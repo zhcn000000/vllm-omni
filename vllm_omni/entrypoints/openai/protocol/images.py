@@ -7,7 +7,6 @@ This module provides Pydantic models that follow the OpenAI DALL-E API specifica
 for text-to-image generation, with vllm-omni specific extensions.
 """
 
-import json
 from enum import Enum
 from typing import Any
 
@@ -213,21 +212,3 @@ class ImageEditRequest(BaseModel):
             "scale|lora_scale, int_id|lora_int_id)."
         ),
     )
-
-    @field_validator("lora")
-    @classmethod
-    def validate_lora(cls, v):
-        """Validate LoRA field - must be a dict if provided."""
-        if isinstance(v, str):
-            try:
-                v_dict = json.loads(v)
-                if isinstance(v_dict, dict):
-                    return v_dict
-                else:
-                    raise ValueError("LoRA field must be a JSON object (dict)")
-            except json.JSONDecodeError:
-                raise ValueError("LoRA field must be a valid JSON string representing a dict")
-        elif isinstance(v, dict) or v is None:
-            return v
-        else:
-            raise ValueError("LoRA field must be either a dict or a JSON string representing a dict")

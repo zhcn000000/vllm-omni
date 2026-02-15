@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import multiprocessing
 import multiprocessing.forkserver as forkserver
 import os
@@ -12,7 +13,7 @@ from http import HTTPStatus
 from typing import Annotated, Any
 
 import vllm.envs as envs
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.datastructures import State
 from starlette.routing import Route
@@ -959,16 +960,19 @@ async def generate_images(
         )
 
 
-@router.post(
-    "/v1/images/edits",
-    responses={
-        HTTPStatus.OK.value: {"model": ImageEditResponse},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-async def edit_images(
+def _parse_form_json(value: str | None) -> Any:
+    if value is None or value == "":
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="Invalid JSON in form field.",
+        ) from exc
+
+
+async def _run_image_edits(
     request: Annotated[ImageEditRequest, Form()],
     raw_request: Request,
 ) -> ImageEditResponse | ErrorResponse:
@@ -999,16 +1003,66 @@ async def edit_images(
 
 
 @router.post(
-    "/v1/videos",
+    "/v1/images/edits",
     responses={
-        HTTPStatus.OK.value: {"model": VideoGenerationResponse},
+        HTTPStatus.OK.value: {"model": ImageEditResponse},
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
-async def create_video(
-    request: Annotated[VideoGenerationRequest, Form()],
+async def edit_images(
+    raw_request: Request,
+    image: list[UploadFile] | None = File(None),
+    image_array: list[UploadFile] | None = File(None, alias="image[]"),
+    url: list[str] | None = Form(None),
+    url_array: list[str] | None = Form(None, alias="url[]"),
+    prompt: str = Form(...),
+    model: str = Form(None),
+    n: int = Form(1),
+    size: str = Form("auto"),
+    response_format: str = Form("b64_json"),
+    output_format: str | None = Form("png"),
+    background: str | None = Form("auto"),
+    output_compression: Annotated[int, Form(ge=0, le=100)] = 100,
+    user: str | None = Form(None),  # unused now
+    # vllm-omni extensions for diffusion control
+    negative_prompt: str | None = Form(None),
+    num_inference_steps: int | None = Form(None),
+    guidance_scale: float | None = Form(None),
+    true_cfg_scale: float | None = Form(None),
+    seed: int | None = Form(None),
+    generator_device: str | None = Form(None),
+    # vllm-omni extension for per-request LoRA.
+    lora: str | None = Form(None),  # Json string
+) -> ImageEditResponse | ErrorResponse:
+    request_data: dict[str, Any] = {
+        "image": image or image_array,
+        "url": url or url_array,
+        "prompt": prompt,
+        "model": model,
+        "n": n,
+        "size": size,
+        "response_format": response_format,
+        "output_format": output_format,
+        "background": background,
+        "output_compression": output_compression,
+        "user": user,
+        "negative_prompt": negative_prompt,
+        "num_inference_steps": num_inference_steps,
+        "guidance_scale": guidance_scale,
+        "true_cfg_scale": true_cfg_scale,
+        "seed": seed,
+        "generator_device": generator_device,
+        "lora": _parse_form_json(lora),
+    }
+    request_data = {k: v for k, v in request_data.items() if v is not None}
+    request = ImageEditRequest(**request_data)
+    return await _run_image_edits(request, raw_request)
+
+
+async def _run_video_generation(
+    request: VideoGenerationRequest,
     raw_request: Request,
     *,
     input_reference_bytes: bytes | None = None,
@@ -1030,3 +1084,67 @@ async def create_video(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
             detail=f"Video generation failed: {str(e)}",
         )
+
+
+@router.post(
+    "/v1/videos",
+    responses={
+        HTTPStatus.OK.value: {"model": VideoGenerationResponse},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+async def create_video(
+    raw_request: Request,
+    prompt: str = Form(...),
+    input_reference: UploadFile | None = File(default=None),
+    model: str | None = Form(default=None),
+    n: int | None = Form(default=None),
+    seconds: int | None = Form(default=None),
+    size: str | None = Form(default=None),
+    response_format: str | None = Form(default=None),
+    user: str | None = Form(default=None),
+    width: int | None = Form(default=None),
+    height: int | None = Form(default=None),
+    num_frames: int | None = Form(default=None),
+    fps: int | None = Form(default=None),
+    num_inference_steps: int | None = Form(default=None),
+    guidance_scale: float | None = Form(default=None),
+    guidance_scale_2: float | None = Form(default=None),
+    boundary_ratio: float | None = Form(default=None),
+    flow_shift: float | None = Form(default=None),
+    true_cfg_scale: float | None = Form(default=None),
+    seed: int | None = Form(default=None),
+    negative_prompt: str | None = Form(default=None),
+    lora: str | None = Form(default=None),
+) -> VideoGenerationResponse:
+    """OpenAI-style video create endpoint (multipart form-data)."""
+    input_reference_bytes = await input_reference.read() if input_reference is not None else None
+
+    request_data: dict[str, Any] = {
+        "prompt": prompt,
+        "model": model,
+        "seconds": seconds,
+        "size": size,
+        "user": user,
+        "response_format": response_format,
+        "input_reference": None,
+        "n": n,
+        "width": width,
+        "height": height,
+        "num_frames": num_frames,
+        "fps": fps,
+        "num_inference_steps": num_inference_steps,
+        "guidance_scale": guidance_scale,
+        "guidance_scale_2": guidance_scale_2,
+        "boundary_ratio": boundary_ratio,
+        "flow_shift": flow_shift,
+        "true_cfg_scale": true_cfg_scale,
+        "seed": seed,
+        "negative_prompt": negative_prompt,
+        "lora": _parse_form_json(lora),
+    }
+    request_data = {k: v for k, v in request_data.items() if v is not None}
+    request = VideoGenerationRequest(**request_data)
+    return await _run_video_generation(request, raw_request, input_reference_bytes=input_reference_bytes)
