@@ -1,30 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import base64
-import io
-import json
 import multiprocessing
 import multiprocessing.forkserver as forkserver
 import os
 
 # Image generation API imports
-import random
-import time
-import uuid
 from argparse import Namespace
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from http import HTTPStatus
-from typing import Annotated, Any, cast
+from typing import Annotated, Any
 
-import httpx
 import vllm.envs as envs
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from PIL import Image
 from starlette.datastructures import State
 from starlette.routing import Route
-from vllm import SamplingParams
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.chat_utils import load_chat_template
@@ -33,6 +24,9 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.mcp.tool_server import DemoToolServer, MCPToolServer, ToolServer
 from vllm.entrypoints.openai.api_server import build_app as build_openai_app
 from vllm.entrypoints.openai.api_server import setup_server as setup_openai_server
+
+from vllm_omni.entrypoints.openai.diffusion_models import DiffusionServingModels
+from vllm_omni.entrypoints.openai.serving_image import OmniOpenAIServingImage
 
 # vLLM moved `base` from openai.basic.api_router to serve.instrumentator.basic.
 # Keep a fallback for older/newer upstream layouts during rebase windows.
@@ -51,9 +45,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
-    ModelCard,
-    ModelList,
-    ModelPermission,
 )
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -82,13 +73,10 @@ from vllm.tool_parsers import ToolParserManager
 from vllm.utils.system_utils import decorate_logs
 
 from vllm_omni.entrypoints.async_omni import AsyncOmni
-from vllm_omni.entrypoints.openai.image_api_utils import (
-    encode_image_base64,
-    parse_size,
-)
 from vllm_omni.entrypoints.openai.protocol.audio import OpenAICreateSpeechRequest
 from vllm_omni.entrypoints.openai.protocol.images import (
-    ImageData,
+    ImageEditRequest,
+    ImageEditResponse,
     ImageGenerationRequest,
     ImageGenerationResponse,
 )
@@ -99,9 +87,6 @@ from vllm_omni.entrypoints.openai.protocol.videos import (
 from vllm_omni.entrypoints.openai.serving_chat import OmniOpenAIServingChat
 from vllm_omni.entrypoints.openai.serving_speech import OmniOpenAIServingSpeech
 from vllm_omni.entrypoints.openai.serving_video import OmniOpenAIServingVideo
-from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniSamplingParams, OmniTextPrompt
-from vllm_omni.lora.request import LoRARequest
-from vllm_omni.lora.utils import stable_lora_int_id
 
 logger = init_logger(__name__)
 router = APIRouter()
@@ -139,31 +124,6 @@ def _remove_route_from_app(app, path: str, methods: set[str] | None = None):
 
     for route in routes_to_remove:
         app.routes.remove(route)
-
-
-class _DiffusionServingModels:
-    """Minimal OpenAIServingModels implementation for diffusion-only servers.
-
-    vLLM's /v1/models route expects `app.state.openai_serving_models` to expose
-    `show_available_models()`. In pure diffusion mode we don't initialize the
-    full OpenAIServingModels (it depends on LLM-specific processors), so we
-    provide a lightweight fallback.
-    """
-
-    def __init__(self, base_model_paths: list[BaseModelPath]) -> None:
-        self._base_model_paths = base_model_paths
-
-    async def show_available_models(self) -> ModelList:
-        return ModelList(
-            data=[
-                ModelCard(
-                    id=base_model.name,
-                    root=base_model.model_path,
-                    permission=[ModelPermission()],
-                )
-                for base_model in self._base_model_paths
-            ]
-        )
 
 
 # Server entry points
@@ -409,7 +369,7 @@ async def omni_init_app_state(
         model_name = served_model_names[0] if served_model_names else args.model
         state.vllm_config = None
         state.diffusion_engine = engine_client
-        state.openai_serving_models = _DiffusionServingModels(base_model_paths)
+        state.openai_serving_models = DiffusionServingModels(base_model_paths)
         # OMNI: tokenization endpoints are not supported in pure diffusion mode.
         state.openai_serving_tokenization = None
 
@@ -706,8 +666,16 @@ async def omni_init_app_state(
 
     state.openai_serving_video = OmniOpenAIServingVideo(
         engine_client,
-        model_name=served_model_names[0] if served_model_names else None,
-        stage_configs=state.stage_configs,
+        state.openai_serving_models,
+        state.stage_configs,
+        request_logger=request_logger,
+    )
+
+    state.openai_serving_image = OmniOpenAIServingImage(
+        engine_client,
+        state.openai_serving_models,
+        state.stage_configs,
+        request_logger=request_logger,
     )
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
@@ -724,6 +692,10 @@ def Omnichat(request: Request) -> OmniOpenAIServingChat | None:
 
 def Omnispeech(request: Request) -> OmniOpenAIServingSpeech | None:
     return request.app.state.openai_serving_speech
+
+
+def Omniimage(request: Request) -> OmniOpenAIServingImage | None:
+    return request.app.state.openai_serving_image
 
 
 @router.post(
@@ -942,7 +914,9 @@ async def show_available_models(raw_request: Request) -> JSONResponse:
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
-async def generate_images(request: ImageGenerationRequest, raw_request: Request) -> ImageGenerationResponse:
+async def generate_images(
+    request: ImageGenerationRequest, raw_request: Request
+) -> ImageGenerationResponse | ErrorResponse:
     """Generate images from text prompts using diffusion models.
 
     OpenAI DALL-E compatible endpoint for text-to-image generation.
@@ -959,82 +933,19 @@ async def generate_images(request: ImageGenerationRequest, raw_request: Request)
         HTTPException: For validation errors, missing engine, or generation failures
     """
     # Get engine client (AsyncOmni) from app state
-    engine_client, model_name, stage_types = _get_engine_and_model(raw_request)
 
     # Validate model field (warn if mismatch, don't error)
-    if request.model is not None and request.model != model_name:
-        logger.warning(
-            f"Model mismatch: request specifies '{request.model}' but "
-            f"server is running '{model_name}'. Using server model."
-        )
-
-    try:
-        # Build params - pass through user values directly
-        prompt: OmniTextPrompt = {"prompt": request.prompt}
-        if request.negative_prompt is not None:
-            prompt["negative_prompt"] = request.negative_prompt
-        gen_params = OmniDiffusionSamplingParams(num_outputs_per_prompt=request.n)
-
-        # Parse per-request LoRA (compatible with chat's extra_body.lora shape).
-        lora_request, lora_scale = _parse_lora_request(request.lora)
-        _update_if_not_none(gen_params, "lora_request", lora_request)
-        _update_if_not_none(gen_params, "lora_scale", lora_scale)
-
-        # Parse and add size if provided
-        width, height = None, None
-        if request.size:
-            width, height = parse_size(request.size)
-            size_str = f"{width}x{height}"
-        else:
-            size_str = "model default"
-        _update_if_not_none(gen_params, "width", width)
-        _update_if_not_none(gen_params, "height", height)
-
-        # 3.3 Add optional parameters ONLY if provided
-        _update_if_not_none(gen_params, "num_inference_steps", request.num_inference_steps)
-        _update_if_not_none(gen_params, "guidance_scale", request.guidance_scale)
-        _update_if_not_none(gen_params, "true_cfg_scale", request.true_cfg_scale)
-        # If seed is not provided, generate a random one to ensure
-        # a proper generator is initialized in the backend.
-        # This fixes issues where using the default global generator
-        # might produce blurry images in some environments.
-        _update_if_not_none(
-            gen_params, "seed", request.seed if request.seed is not None else random.randint(0, 2**32 - 1)
-        )
-        _update_if_not_none(gen_params, "generator_device", request.generator_device)
-
-        request_id = f"img_gen_{uuid.uuid4().hex}"
-
-        logger.info(f"Generating {request.n} image(s) {size_str}")
-
-        # Generate images using AsyncOmni (multi-stage mode)
-        result = await _generate_with_async_omni(
-            engine_client=engine_client,
-            gen_params=gen_params,
-            stage_types=stage_types,
-            prompt=prompt,
-            request_id=request_id,
-        )
-
-        if result is None:
+    handler = Omniimage(raw_request)
+    if handler is None:
+        base_server = getattr(raw_request.app.state, "openai_serving_tokenization", None)
+        if base_server is None:
             raise HTTPException(
-                status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-                detail="No output generated from multi-stage pipeline.",
+                status_code=HTTPStatus.NOT_FOUND.value,
+                detail="The model does not support Image Generation API",
             )
-
-        # Extract images from result
-        images = _extract_images_from_result(result)
-
-        logger.info(f"Successfully generated {len(images)} image(s)")
-
-        # Encode images to base64
-        image_data = [ImageData(b64_json=encode_image_base64(img), revised_prompt=None) for img in images]
-
-        return ImageGenerationResponse(
-            created=int(time.time()),
-            data=image_data,
-        )
-
+        return base_server.create_error_response(message="The model does not support Image Generation API")
+    try:
+        return await handler.generate_image(request, raw_request)
     except HTTPException:
         # Re-raise HTTPExceptions as-is
         raise
@@ -1051,151 +962,31 @@ async def generate_images(request: ImageGenerationRequest, raw_request: Request)
 @router.post(
     "/v1/images/edits",
     responses={
-        HTTPStatus.OK.value: {"model": ImageGenerationResponse},
+        HTTPStatus.OK.value: {"model": ImageEditResponse},
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
         HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
 async def edit_images(
+    request: Annotated[ImageEditRequest, Form()],
     raw_request: Request,
-    image: list[UploadFile] | None = File(None),
-    image_array: list[UploadFile] | None = File(None, alias="image[]"),
-    url: list[str] | None = Form(None),
-    url_array: list[str] | None = Form(None, alias="url[]"),
-    prompt: str = Form(...),
-    model: str = Form(None),
-    n: int = Form(1),
-    size: str = Form("auto"),
-    response_format: str = Form("b64_json"),
-    output_format: str | None = Form("png"),
-    background: str | None = Form("auto"),
-    output_compression: Annotated[int, Form(ge=0, le=100)] = 100,
-    user: str | None = Form(None),  # unused now
-    # vllm-omni extensions for diffusion control
-    negative_prompt: str | None = Form(None),
-    num_inference_steps: int | None = Form(None),
-    guidance_scale: float | None = Form(None),
-    true_cfg_scale: float | None = Form(None),
-    seed: int | None = Form(None),
-    generator_device: str | None = Form(None),
-    # vllm-omni extension for per-request LoRA.
-    lora: str | None = Form(None),  # Json string
-) -> ImageGenerationResponse:
+) -> ImageEditResponse | ErrorResponse:
     """
     OpenAI-compatible image edit endpoint.
     """
     # 1. get engine and model
-    engine_client, model_name, stage_types = _get_engine_and_model(raw_request)
-    if model is not None and model != model_name:
-        logger.warning(
-            f"Model mismatch: request specifies '{model}' but server is running '{model_name}'. Using server model."
-        )
-    # 2. get output format & compression
-    output_format = _choose_output_format(output_format, background)
-    if response_format != "b64_json":
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value,
-            detail="Only response_format 'b64_json' is supported now.",
-        )
-    try:
-        # 2. Build prompt & images params
-        prompt: OmniTextPrompt = {"prompt": prompt}
-        if negative_prompt is not None:
-            prompt["negative_prompt"] = negative_prompt
-        input_images_list = []
-        images = image or image_array
-        urls = url or url_array
-        if images:
-            input_images_list.extend(images)
-        if urls:
-            input_images_list.extend(urls)
-        if not input_images_list:
-            raise HTTPException(status_code=422, detail="Field 'image' or 'url' is required")
-        pil_images = await _load_input_images(input_images_list)
-        prompt["multi_modal_data"] = {}
-        prompt["multi_modal_data"]["image"] = pil_images
-
-        # 3 Build sample params
-        gen_params = OmniDiffusionSamplingParams()
-        # 3.0 Init with system default values
-        app_state_args = getattr(raw_request.app.state, "args", None)
-        default_sample_param = getattr(app_state_args, "default_sampling_params", None)
-        # Currently only have one diffusion stage
-        diffusion_stage_id = [i for i, t in enumerate(stage_types) if t == "diffusion"][0]
-        apply_stage_default_sampling_params(
-            default_sample_param,
-            gen_params,
-            str(diffusion_stage_id),
-        )
-        _update_if_not_none(gen_params, "num_outputs_per_prompt", n)
-        # 3.1 Parse per-request LoRA (compatible with chat's extra_body.lora shape).
-        lora_dict = _get_lora_from_json_str(lora)
-        lora_request, lora_scale = _parse_lora_request(lora_dict)
-        _update_if_not_none(gen_params, "lora_request", lora_request)
-        _update_if_not_none(gen_params, "lora_scale", lora_scale)
-        # 3.2 Parse and add size if provided
-        max_generated_image_size = getattr(app_state_args, "max_generated_image_size", None)
-        width, height = None, None
-        if size.lower() == "auto":
-            width, height = pil_images[0].size  # Use first image size
-        else:
-            width, height = parse_size(size)
-        if max_generated_image_size is not None and (width * height > max_generated_image_size):
+    handler = Omniimage(raw_request)
+    if handler is None:
+        base_server = getattr(raw_request.app.state, "openai_serving_tokenization", None)
+        if base_server is None:
             raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST.value,
-                detail=f"Requested image size {width}x{height} exceeds the maximum allowed "
-                f"size of {max_generated_image_size} pixels.",
+                status_code=HTTPStatus.NOT_FOUND.value,
+                detail="The model does not support Image Edit API",
             )
-
-        size_str = f"{width}x{height}"
-        _update_if_not_none(gen_params, "width", width)
-        _update_if_not_none(gen_params, "height", height)
-
-        # 3.3 Add optional parameters ONLY if provided
-        _update_if_not_none(gen_params, "num_inference_steps", num_inference_steps)
-        _update_if_not_none(gen_params, "guidance_scale", guidance_scale)
-        _update_if_not_none(gen_params, "true_cfg_scale", true_cfg_scale)
-        # If seed is not provided, generate a random one to ensure
-        # a proper generator is initialized in the backend.
-        # This fixes issues where using the default global generator
-        # might produce blurry images in some environments.
-        _update_if_not_none(gen_params, "seed", seed if seed is not None else random.randint(0, 2**32 - 1))
-        _update_if_not_none(gen_params, "generator_device", generator_device)
-
-        # 4. Generate images using AsyncOmni (multi-stage mode)
-        request_id = f"img_edit_{int(time.time())}"
-        logger.info(f"Generating {n} image(s) {size_str}")
-        result = await _generate_with_async_omni(
-            engine_client=engine_client,
-            gen_params=gen_params,
-            stage_types=stage_types,
-            prompt=prompt,
-            request_id=request_id,
-        )
-
-        # 5. Extract images from result
-        images = _extract_images_from_result(result)
-        logger.info(f"Successfully generated {len(images)} image(s)")
-
-        # Encode images to base64
-        image_data = [
-            ImageData(
-                b64_json=_encode_image_base64_with_compression(
-                    img, format=output_format, output_compression=output_compression
-                ),
-                revised_prompt=None,
-            )
-            for img in images
-        ]
-
-        return ImageGenerationResponse(
-            created=int(time.time()),
-            data=image_data,
-            output_format=output_format,
-            size=size_str,
-        )
-
+        return base_server.create_error_response(message="The model does not support Image Edit API")
+    try:
+        return await handler.edit_images(request, raw_request)
     except HTTPException:
         # Re-raise HTTPExceptions as-is
         raise
@@ -1207,289 +998,17 @@ async def edit_images(
         raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=f"Image edit failed: {str(e)}")
 
 
-def _get_engine_and_model(raw_request: Request):
-    # Get engine client (AsyncOmni) from app state
-    engine_client: EngineClient | AsyncOmni | None = getattr(raw_request.app.state, "engine_client", None)
-    if engine_client is None or not hasattr(engine_client, "stage_list"):
-        raise HTTPException(
-            status_code=HTTPStatus.SERVICE_UNAVAILABLE.value,
-            detail="Multi-stage engine not initialized. Start server with a multi-stage omni model.",
-        )
-
-    # Check if there's a diffusion stage
-    stage_configs = getattr(raw_request.app.state, "stage_configs", None)
-    if not stage_configs:
-        raise HTTPException(
-            status_code=HTTPStatus.SERVICE_UNAVAILABLE.value,
-            detail="Stage configs not found. Start server with a multi-stage omni model.",
-        )
-
-    # Check for diffusion stage and collect stage types
-    has_diffusion_stage = False
-    stage_types: list[str] = []
-    for stage in stage_configs:
-        # Handle both dict and OmegaConf objects
-        stage_type = None
-        if isinstance(stage, dict):
-            stage_type = stage.get("stage_type", "llm")
-        elif hasattr(stage, "get"):
-            stage_type = stage.get("stage_type", "llm")
-        elif hasattr(stage, "stage_type"):
-            stage_type = stage.stage_type
-        else:
-            # Fallback: try to access as dict-like
-            try:
-                stage_type = stage["stage_type"] if "stage_type" in stage else "llm"
-            except (TypeError, KeyError):
-                stage_type = "llm"
-
-        if stage_type == "diffusion":
-            has_diffusion_stage = True
-        stage_types.append(stage_type)
-
-    if not has_diffusion_stage:
-        raise HTTPException(
-            status_code=HTTPStatus.SERVICE_UNAVAILABLE.value,
-            detail="No diffusion stage found in multi-stage pipeline.",
-        )
-
-    # Get server's loaded model name
-    serving_models = getattr(raw_request.app.state, "openai_serving_models", None)
-    if serving_models and hasattr(serving_models, "base_model_paths") and serving_models.base_model_paths:
-        model_name = serving_models.base_model_paths[0].name
-    else:
-        model_name = "unknown"
-
-    return engine_client, model_name, stage_types
-
-
-def _get_lora_from_json_str(lora_body):
-    if lora_body is None:
-        return None
-    try:
-        lora_dict = json.loads(lora_body)
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=400, detail="Invalid LoRA JSON string")
-
-    if not isinstance(lora_dict, dict):
-        raise HTTPException(status_code=400, detail="LoRA must be a JSON object")
-
-    return lora_dict
-
-
-def _parse_lora_request(lora_body: dict[str, Any]):
-    if lora_body is not None:
-        if not isinstance(lora_body, dict):
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST.value,
-                detail="Invalid lora field: expected an object.",
-            )
-        lora_name = lora_body.get("name") or lora_body.get("lora_name") or lora_body.get("adapter")
-        lora_path = (
-            lora_body.get("local_path")
-            or lora_body.get("path")
-            or lora_body.get("lora_path")
-            or lora_body.get("lora_local_path")
-        )
-        lora_scale = lora_body.get("scale")
-        if lora_scale is None:
-            lora_scale = lora_body.get("lora_scale")
-        lora_int_id = lora_body.get("int_id")
-        if lora_int_id is None:
-            lora_int_id = lora_body.get("lora_int_id")
-        if lora_int_id is None and lora_path:
-            lora_int_id = stable_lora_int_id(str(lora_path))
-
-        if not lora_name or not lora_path:
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST.value,
-                detail="Invalid lora object: both name and path are required.",
-            )
-
-        return LoRARequest(str(lora_name), int(lora_int_id), str(lora_path)), lora_scale
-    return None, None
-
-
-async def _generate_with_async_omni(
-    engine_client: AsyncOmni | Any,
-    gen_params: Any,
-    stage_types: list[str],
-    **kwargs,
-):
-    engine_client = cast(AsyncOmni, engine_client)
-    result = None
-    stage_list = getattr(engine_client, "stage_list", None)
-    if isinstance(stage_list, list):
-        default_params_list: list[OmniSamplingParams] | None = getattr(
-            engine_client, "default_sampling_params_list", None
-        )
-        if not isinstance(default_params_list, list):
-            default_params_list = [
-                OmniDiffusionSamplingParams() if st == "diffusion" else SamplingParams() for st in stage_types
-            ]
-        else:
-            default_params_list = list(default_params_list)
-        if len(default_params_list) != len(stage_types):
-            default_params_list = (
-                default_params_list
-                + [OmniDiffusionSamplingParams() if st == "diffusion" else SamplingParams() for st in stage_types]
-            )[: len(stage_types)]
-
-        sampling_params_list: list[OmniSamplingParams] = []
-        for idx, stage_type in enumerate(stage_types):
-            if stage_type == "diffusion":
-                sampling_params_list.append(gen_params)
-            else:
-                base_params = default_params_list[idx]
-                sampling_params_list.append(base_params)
-
-        async for output in engine_client.generate(
-            sampling_params_list=sampling_params_list,
-            **kwargs,
-        ):
-            result = output
-    else:
-        result = await engine_client.generate(
-            sampling_params_list=[gen_params],
-            **kwargs,
-        )
-
-    if result is None:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-            detail="No output generated from multi-stage pipeline.",
-        )
-    return result
-
-
-def _update_if_not_none(object: any, key: str, val: any) -> None:
-    if val is not None:
-        setattr(object, key, val)
-
-
-def _extract_images_from_result(result: Any) -> list[Any]:
-    images = []
-    if hasattr(result, "images") and result.images:
-        images = result.images
-    elif hasattr(result, "request_output"):
-        request_output = result.request_output
-        if isinstance(request_output, dict) and request_output.get("images"):
-            images = request_output["images"]
-        elif hasattr(request_output, "images") and request_output.images:
-            images = request_output.images
-    return images
-
-
-async def _load_input_images(
-    inputs: list[str],
-) -> list[Image.Image]:
-    """
-    convert to PIL.Image.Image list
-    """
-    if isinstance(inputs, str):
-        inputs = [inputs]
-
-    images: list[Image.Image] = []
-
-    for inp in inputs:
-        # 1. URL + base64
-        if isinstance(inp, str) and inp.startswith("data:image"):
-            try:
-                _, b64_data = inp.split(",", 1)
-                image_bytes = base64.b64decode(b64_data)
-                img = Image.open(io.BytesIO(image_bytes))
-                images.append(img)
-            except Exception as e:
-                raise ValueError(f"Invalid base64 image: {e}")
-
-        # 2. URL
-        elif isinstance(inp, str) and inp.startswith("http"):
-            async with httpx.AsyncClient(timeout=60) as client:
-                try:
-                    resp = await client.get(inp)
-                    resp.raise_for_status()
-                    img = Image.open(io.BytesIO(resp.content))
-                    images.append(img)
-                except Exception as e:
-                    raise ValueError(f"Failed to download image from URL {inp}: {e}")
-
-        # 3. UploadFile
-        elif hasattr(inp, "file"):
-            try:
-                img_data = await inp.read()
-                img = Image.open(io.BytesIO(img_data))
-                images.append(img)
-            except Exception as e:
-                raise ValueError(f"Failed to open uploaded file: {e}")
-        else:
-            raise ValueError(f"Unsupported input: {inp}")
-
-    if not images:
-        raise ValueError("No valid input images found")
-
-    return images
-
-
-def _choose_output_format(output_format: str | None, background: str | None) -> str:
-    # Normalize and choose extension
-    fmt = (output_format or "").lower()
-    if fmt in {"jpg", "png", "webp", "jpeg"}:
-        return fmt
-    # If transparency requested, prefer png
-    if (background or "auto").lower() == "transparent":
-        return "png"
-    # Default
-    return "jpeg"
-
-
-def _encode_image_base64_with_compression(
-    image: Image.Image, format: str = "png", output_compression: int = 100
-) -> str:
-    """Encode PIL Image to base64 PNG string.
-
-    Args:
-        image: PIL Image object
-        format: Output image format (e.g., "PNG", "JPEG", "WEBP")
-        output_compression: Compression level (0-100%), 100 for best quality
-    Returns:
-        Base64-encoded image as string
-    """
-    buffer = io.BytesIO()
-    save_kwargs = {}
-    if format in ("jpg", "jpeg", "webp"):
-        save_kwargs["quality"] = output_compression
-    elif format == "png":
-        save_kwargs["compress_level"] = max(0, min(9, 9 - output_compression // 11))  # Map 0-100 to 9-0
-
-    image.save(buffer, format=format, **save_kwargs)
-    buffer.seek(0)
-    return base64.b64encode(buffer.read()).decode("utf-8")
-
-
-def apply_stage_default_sampling_params(
-    default_params_json: str | None,
-    sampling_params: any,
-    stage_key: str,
-) -> None:
-    """
-    Update a stage's sampling parameters with vLLM-Omni defaults.
-
-    Args:
-        default_params_json: JSON string of stage-keyed default parameters
-        sampling_params: The sampling parameters object to update
-        stage_key: The stage ID/key in the pipeline
-    """
-    if default_params_json is not None:
-        default_params_dict = json.loads(default_params_json)
-        if stage_key in default_params_dict:
-            stage_defaults = default_params_dict[stage_key]
-            for param_name, param_value in stage_defaults.items():
-                if hasattr(sampling_params, param_name):
-                    setattr(sampling_params, param_name, param_value)
-
-
-async def _run_video_generation(
-    request: VideoGenerationRequest,
+@router.post(
+    "/v1/videos",
+    responses={
+        HTTPStatus.OK.value: {"model": VideoGenerationResponse},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+async def create_video(
+    request: Annotated[VideoGenerationRequest, Form()],
     raw_request: Request,
     *,
     input_reference_bytes: bytes | None = None,
@@ -1511,79 +1030,3 @@ async def _run_video_generation(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
             detail=f"Video generation failed: {str(e)}",
         )
-
-
-def _parse_form_json(value: str | None) -> Any:
-    if value is None or value == "":
-        return None
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value,
-            detail="Invalid JSON in form field.",
-        ) from exc
-
-
-@router.post(
-    "/v1/videos",
-    responses={
-        HTTPStatus.OK.value: {"model": VideoGenerationResponse},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.SERVICE_UNAVAILABLE.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-async def create_video(
-    raw_request: Request,
-    prompt: str = Form(...),
-    input_reference: UploadFile | None = File(default=None),
-    model: str | None = Form(default=None),
-    n: int | None = Form(default=None),
-    seconds: int | None = Form(default=None),
-    size: str | None = Form(default=None),
-    response_format: str | None = Form(default=None),
-    user: str | None = Form(default=None),
-    width: int | None = Form(default=None),
-    height: int | None = Form(default=None),
-    num_frames: int | None = Form(default=None),
-    fps: int | None = Form(default=None),
-    num_inference_steps: int | None = Form(default=None),
-    guidance_scale: float | None = Form(default=None),
-    guidance_scale_2: float | None = Form(default=None),
-    boundary_ratio: float | None = Form(default=None),
-    flow_shift: float | None = Form(default=None),
-    true_cfg_scale: float | None = Form(default=None),
-    seed: int | None = Form(default=None),
-    negative_prompt: str | None = Form(default=None),
-    lora: str | None = Form(default=None),
-) -> VideoGenerationResponse:
-    """OpenAI-style video create endpoint (multipart form-data)."""
-    input_reference_bytes = await input_reference.read() if input_reference is not None else None
-
-    request_data: dict[str, Any] = {
-        "prompt": prompt,
-        "model": model,
-        "seconds": seconds,
-        "size": size,
-        "user": user,
-        "response_format": response_format,
-        "input_reference": None,
-        "n": n,
-        "width": width,
-        "height": height,
-        "num_frames": num_frames,
-        "fps": fps,
-        "num_inference_steps": num_inference_steps,
-        "guidance_scale": guidance_scale,
-        "guidance_scale_2": guidance_scale_2,
-        "boundary_ratio": boundary_ratio,
-        "flow_shift": flow_shift,
-        "true_cfg_scale": true_cfg_scale,
-        "seed": seed,
-        "negative_prompt": negative_prompt,
-        "lora": _parse_form_json(lora),
-    }
-    request_data = {k: v for k, v in request_data.items() if v is not None}
-    request = VideoGenerationRequest(**request_data)
-    return await _run_video_generation(request, raw_request, input_reference_bytes=input_reference_bytes)

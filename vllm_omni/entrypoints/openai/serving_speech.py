@@ -3,7 +3,10 @@ from typing import Any
 
 from fastapi import Request
 from fastapi.responses import Response
+from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 
@@ -16,7 +19,6 @@ from vllm_omni.entrypoints.openai.protocol.audio import (
 from vllm_omni.outputs import OmniRequestOutput
 
 logger = init_logger(__name__)
-
 # TTS Configuration (currently supports Qwen3-TTS)
 _TTS_MODEL_STAGES: set[str] = {"qwen3_tts"}
 _TTS_LANGUAGES: set[str] = {
@@ -38,8 +40,22 @@ _TTS_MAX_NEW_TOKENS_MAX = 4096
 
 
 class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        engine_client: EngineClient,
+        models: OpenAIServingModels,
+        *,
+        request_logger: RequestLogger | None,
+        return_tokens_as_token_ids: bool = False,
+        log_error_stack: bool = False,
+    ):
+        super().__init__(
+            engine_client,
+            models,
+            request_logger=request_logger,
+            return_tokens_as_token_ids=return_tokens_as_token_ids,
+            log_error_stack=log_error_stack,
+        )
         # Load supported speakers
         self.supported_speakers = self._load_supported_speakers()
         logger.info(f"Loaded {len(self.supported_speakers)} supported speakers: {sorted(self.supported_speakers)}")

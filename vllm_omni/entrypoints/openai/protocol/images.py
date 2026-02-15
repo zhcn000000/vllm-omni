@@ -7,6 +7,7 @@ This module provides Pydantic models that follow the OpenAI DALL-E API specifica
 for text-to-image generation, with vllm-omni specific extensions.
 """
 
+import json
 from enum import Enum
 from typing import Any
 
@@ -127,5 +128,84 @@ class ImageGenerationResponse(BaseModel):
 
     created: int = Field(..., description="Unix timestamp of when the generation completed")
     data: list[ImageData] = Field(..., description="Array of generated images")
-    output_format: str = Field(None, description="The output format of the image generation")
-    size: str = Field(None, description="The size of the image generated")
+
+
+class ImageEditResponse(BaseModel):
+    """
+    OpenAI DALL-E compatible image generation response.
+
+    Returns generated images with metadata.
+    """
+
+    created: int = Field(..., description="Unix timestamp of when the generation completed")
+    data: list[ImageData] = Field(..., description="Array of generated images")
+    output_format: str = Field(..., description="The output format of the image generation")
+    size: str = Field(..., description="The size of the image generated")
+
+
+class ImageEditRequest(BaseModel):
+    prompt: str = Field(..., description="Text description of the desired image edit")
+    model: str | None = Field(
+        default=None,
+        description="Model to use (optional, uses server's configured model if omitted)",
+    )
+    n: int = Field(default=1, ge=1, le=10, description="Number of images to generate")
+    size: str | None = Field(
+        default=None,
+        description="Image dimensions in WIDTHxHEIGHT format (e.g., '1024x1024', uses model defaults if omitted)",
+    )
+    response_format: ResponseFormat = Field(default=ResponseFormat.B64_JSON, description="Format of the returned image")
+    user: str | None = Field(default=None, description="User identifier for tracking")
+
+    # vllm-omni extensions for diffusion control
+    negative_prompt: str | None = Field(default=None, description="Text describing what to avoid in the image")
+    num_inference_steps: int | None = Field(
+        default=None,
+        ge=1,
+        le=200,
+        description="Number of diffusion sampling steps (uses model defaults if not specified)",
+    )
+    guidance_scale: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=20.0,
+        description="Classifier-free guidance scale (uses model defaults if not specified)",
+    )
+    true_cfg_scale: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=20.0,
+        description="True CFG scale (model-specific parameter, may be ignored if not supported)",
+    )
+    seed: int | None = Field(default=None, description="Random seed for reproducibility")
+    generator_device: str | None = Field(
+        default=None,
+        description="Device for the seeded torch.Generator (e.g. 'cpu', 'cuda'). Defaults to the runner's device.",
+    )
+    lora: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Optional LoRA adapter for this request. Expected shape: "
+            "{name/path/scale/int_id}. Field names are flexible "
+            "(e.g. name|lora_name|adapter, path|lora_path|local_path, "
+            "scale|lora_scale, int_id|lora_int_id)."
+        ),
+    )
+
+    @field_validator("lora")
+    @classmethod
+    def validate_lora(cls, v):
+        """Validate LoRA field - must be a dict if provided."""
+        if isinstance(v, str):
+            try:
+                v_dict = json.loads(v)
+                if isinstance(v_dict, dict):
+                    return v_dict
+                else:
+                    raise ValueError("LoRA field must be a JSON object (dict)")
+            except json.JSONDecodeError:
+                raise ValueError("LoRA field must be a valid JSON string representing a dict")
+        elif isinstance(v, dict) or v is None:
+            return v
+        else:
+            raise ValueError("LoRA field must be either a dict or a JSON string representing a dict")

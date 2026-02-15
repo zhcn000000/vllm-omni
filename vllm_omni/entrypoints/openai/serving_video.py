@@ -4,16 +4,20 @@
 from __future__ import annotations
 
 import time
-import uuid
 from http import HTTPStatus
 from typing import Any, cast
 
 from fastapi import HTTPException, Request
 from PIL import Image
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.engine.serving import OpenAIServing
+from vllm.entrypoints.openai.models.protocol import BaseModelPath
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.logger import init_logger
 
 from vllm_omni.entrypoints.async_omni import AsyncOmni
+from vllm_omni.entrypoints.openai.diffusion_models import DiffusionServingModels
 from vllm_omni.entrypoints.openai.image_api_utils import parse_size
 from vllm_omni.entrypoints.openai.protocol.videos import (
     VideoData,
@@ -28,17 +32,28 @@ from vllm_omni.lora.utils import stable_lora_int_id
 logger = init_logger(__name__)
 
 
-class OmniOpenAIServingVideo:
+class OmniOpenAIServingVideo(OpenAIServing):
     """OpenAI-style video generation handler for omni diffusion models."""
 
     def __init__(
         self,
         engine_client: EngineClient,
-        model_name: str | None = None,
+        models: OpenAIServingModels,
         stage_configs: list[Any] | None = None,
+        *,
+        request_logger: RequestLogger | None = None,
+        return_tokens_as_token_ids: bool = False,
+        log_error_stack: bool = False,
     ) -> None:
+        super().__init__(
+            engine_client,
+            models,
+            request_logger=request_logger,
+            return_tokens_as_token_ids=return_tokens_as_token_ids,
+            log_error_stack=log_error_stack,
+        )
         self._engine_client = engine_client
-        self._model_name = model_name
+        self._model_name = models.model_name
         self._stage_configs = stage_configs
 
     @classmethod
@@ -50,7 +65,11 @@ class OmniOpenAIServingVideo:
     ) -> OmniOpenAIServingVideo:
         return cls(
             diffusion_engine,
-            model_name=model_name,
+            models=DiffusionServingModels(  # type: ignore[return-value]
+                base_model_paths=[
+                    BaseModelPath(name=model_name, model_path=model_name),
+                ]
+            ),
             stage_configs=stage_configs,
         )
 
@@ -67,7 +86,7 @@ class OmniOpenAIServingVideo:
                 detail="Streaming video generation is not supported yet.",
             )
 
-        request_id = f"video_gen_{uuid.uuid4().hex}"
+        request_id = f"video_gen_{self._base_request_id(raw_request)}"
         model_name = self._resolve_model_name(raw_request)
 
         if request.model is not None and model_name is not None and request.model != model_name:

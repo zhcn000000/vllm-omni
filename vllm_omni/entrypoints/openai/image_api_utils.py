@@ -10,6 +10,8 @@ FastAPI HTTP layer.
 
 import base64
 import io
+import json
+from typing import Any
 
 import PIL.Image
 
@@ -63,3 +65,25 @@ def encode_image_base64(image: PIL.Image.Image) -> str:
     image.save(buffer, format="PNG")
     buffer.seek(0)
     return base64.b64encode(buffer.read()).decode("utf-8")
+
+
+def apply_stage_default_sampling_params(
+    default_params_json: str | None,
+    sampling_params: Any,
+    stage_key: str,
+) -> None:
+    """
+    Update a stage's sampling parameters with vLLM-Omni defaults.
+
+    Args:
+        default_params_json: JSON string of stage-keyed default parameters
+        sampling_params: The sampling parameters object to update
+        stage_key: The stage ID/key in the pipeline
+    """
+    if default_params_json is not None:
+        default_params_dict = json.loads(default_params_json)
+        if stage_key in default_params_dict:
+            stage_defaults = default_params_dict[stage_key]
+            for param_name, param_value in stage_defaults.items():
+                if hasattr(sampling_params, param_name):
+                    setattr(sampling_params, param_name, param_value)
