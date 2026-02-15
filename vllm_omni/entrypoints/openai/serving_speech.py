@@ -8,7 +8,6 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.logger import init_logger
-from vllm.utils import random_uuid
 
 from vllm_omni.entrypoints.openai.audio_utils_mixin import AudioMixin
 from vllm_omni.entrypoints.openai.protocol.audio import (
@@ -228,7 +227,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        request_id = f"speech-{random_uuid()}"
+        request_id = f"speech-{self._base_request_id(raw_request)}"
 
         try:
             if self._is_tts_model():
