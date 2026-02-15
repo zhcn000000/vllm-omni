@@ -5,14 +5,13 @@ from __future__ import annotations
 
 import time
 from http import HTTPStatus
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from fastapi import HTTPException, Request
 from PIL import Image
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
-from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.logger import init_logger
 
@@ -28,6 +27,9 @@ from vllm_omni.entrypoints.openai.video_api_utils import decode_input_reference,
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniSamplingParams, OmniTextPrompt
 from vllm_omni.lora.request import LoRARequest
 from vllm_omni.lora.utils import stable_lora_int_id
+
+if TYPE_CHECKING:
+    from vllm_omni.entrypoints.async_omni_diffusion import AsyncOmniDiffusion
 
 logger = init_logger(__name__)
 
@@ -59,17 +61,13 @@ class OmniOpenAIServingVideo(OpenAIServing):
     @classmethod
     def for_diffusion(
         cls,
-        diffusion_engine: EngineClient,
-        model_name: str,
+        diffusion_engine: AsyncOmniDiffusion,
+        models: DiffusionServingModels,
         stage_configs: list[Any] | None = None,
     ) -> OmniOpenAIServingVideo:
         return cls(
-            diffusion_engine,
-            models=DiffusionServingModels(  # type: ignore[return-value]
-                base_model_paths=[
-                    BaseModelPath(name=model_name, model_path=model_name),
-                ]
-            ),
+            diffusion_engine,  # type: ignore[arg-type]
+            models=models,  # type: ignore[arg-type]
             stage_configs=stage_configs,
         )
 
