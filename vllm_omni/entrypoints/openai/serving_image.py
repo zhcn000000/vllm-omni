@@ -40,6 +40,8 @@ from vllm_omni.outputs import OmniRequestOutput
 
 
 class OmniOpenAIServingImage(OpenAIServing):
+    """OpenAI-style image generation handler for omni diffusion models."""
+
     def __init__(
         self,
         engine_client: EngineClient,
@@ -112,21 +114,21 @@ class OmniOpenAIServingImage(OpenAIServing):
             )
             if not isinstance(default_params_list, list):
                 default_params_list = [
-                    OmniDiffusionSamplingParams() if st == "diffusion" else SamplingParams() for st in self.stage_types
+                    OmniDiffusionSamplingParams() if st == "diffusion" else SamplingParams() for st in self._stage_types
                 ]
             else:
                 default_params_list = list(default_params_list)
-            if len(default_params_list) != len(self.stage_types):
+            if len(default_params_list) != len(self._stage_types):
                 default_params_list = (
                     default_params_list
                     + [
                         OmniDiffusionSamplingParams() if st == "diffusion" else SamplingParams()
-                        for st in self.stage_types
+                        for st in self._stage_types
                     ]
-                )[: len(self.stage_types)]
+                )[: len(self._stage_types)]
 
             sampling_params_list: list[OmniSamplingParams] = []
-            for idx, stage_type in enumerate(self.stage_types):
+            for idx, stage_type in enumerate(self._stage_types):
                 if stage_type == "diffusion":
                     sampling_params_list.append(gen_params)
                 else:
@@ -292,7 +294,7 @@ class OmniOpenAIServingImage(OpenAIServing):
         request: ImageGenerationRequest,
         raw_request: Request | None = None,
     ) -> ImageGenerationResponse | ErrorResponse:
-        """处理图像生成请求."""
+        """Process image generation request."""
         engine_client = self.engine_client
         engine_client = cast(AsyncOmni, engine_client)
         prompt = OmniTextPrompt(
@@ -351,7 +353,7 @@ class OmniOpenAIServingImage(OpenAIServing):
         request: ImageEditRequest,
         raw_request: Request | None = None,
     ) -> ImageEditResponse | ErrorResponse:
-        """处理图像编辑请求."""
+        """Process image editing request."""
         # 2. get output format & compression
         output_format = self._choose_output_format(request.output_format, request.background)
         if request.response_format != "b64_json":
@@ -366,8 +368,8 @@ class OmniOpenAIServingImage(OpenAIServing):
         if request.negative_prompt is not None:
             prompt["negative_prompt"] = request.negative_prompt
         input_images_list = []
-        images = request.image or request.image_array
-        urls = request.url or request.url_array
+        images = request.image
+        urls = request.url
         if images:
             input_images_list.extend(images)
         if urls:
@@ -384,7 +386,7 @@ class OmniOpenAIServingImage(OpenAIServing):
         app_state_args = getattr(raw_request.app.state, "args", None)
         default_sample_param = getattr(app_state_args, "default_sampling_params", None)
         # Currently only have one diffusion stage
-        diffusion_stage_id = [i for i, t in enumerate(self.stage_types) if t == "diffusion"][0]
+        diffusion_stage_id = [i for i, t in enumerate(self._stage_types) if t == "diffusion"][0]
         apply_stage_default_sampling_params(
             default_sample_param,
             gen_params,
@@ -402,10 +404,12 @@ class OmniOpenAIServingImage(OpenAIServing):
         max_generated_image_size = getattr(app_state_args, "max_generated_image_size", None)
 
         width, height = None, None
-        if request.size.lower() == "auto":
+        size = request.size or "auto"
+        if size.lower() == "auto":
             width, height = pil_images[0].size  # Use first image size
         else:
-            width, height = parse_size(request.size)
+            width, height = parse_size(size)
+
         if max_generated_image_size is not None and (width * height > max_generated_image_size):
             raise HTTPException(
                 status_code=HTTPStatus.BAD_REQUEST.value,

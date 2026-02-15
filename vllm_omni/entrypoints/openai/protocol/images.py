@@ -11,6 +11,7 @@ import json
 from enum import Enum
 from typing import Any
 
+from fastapi import UploadFile
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -144,6 +145,8 @@ class ImageEditResponse(BaseModel):
 
 
 class ImageEditRequest(BaseModel):
+    image: list[UploadFile] = Field(..., description="Image file to edit")
+    url: str | None = Field(default=None, description="URL of the image to edit")
     prompt: str = Field(..., description="Text description of the desired image edit")
     model: str | None = Field(
         default=None,
@@ -153,6 +156,16 @@ class ImageEditRequest(BaseModel):
     size: str | None = Field(
         default=None,
         description="Image dimensions in WIDTHxHEIGHT format (e.g., '1024x1024', uses model defaults if omitted)",
+    )
+    output_format: str = Field(
+        default="png", description="The output format of the image generation (e.g., 'png', 'jpeg')"
+    )
+    background: str | None = Field(
+        default=None,
+        description=(
+            "Background color for transparent areas in the edited image (e.g., '#FFFFFF' for white). "
+            "If not specified, transparent areas will remain transparent in formats that support it (e.g., PNG)."
+        ),
     )
     response_format: ResponseFormat = Field(default=ResponseFormat.B64_JSON, description="Format of the returned image")
     user: str | None = Field(default=None, description="User identifier for tracking")
@@ -181,6 +194,15 @@ class ImageEditRequest(BaseModel):
     generator_device: str | None = Field(
         default=None,
         description="Device for the seeded torch.Generator (e.g. 'cpu', 'cuda'). Defaults to the runner's device.",
+    )
+    output_compression: int = Field(
+        default=100,
+        ge=0,
+        le=100,
+        description=(
+            "Output compression level for edited images (0-100). Higher values result in smaller file sizes "
+            "but lower image quality. Defaults to 0 (no compression)."
+        ),
     )
     lora: dict[str, Any] | None = Field(
         default=None,
