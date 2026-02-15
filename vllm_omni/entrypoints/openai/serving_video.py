@@ -53,7 +53,7 @@ class OmniOpenAIServingVideo(OpenAIServing):
             log_error_stack=log_error_stack,
         )
         self._engine_client = engine_client
-        self._model_name = models.model_name
+        self._model_name = models.model_name()
         self._stage_configs = stage_configs
 
     @classmethod

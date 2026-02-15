@@ -16,8 +16,7 @@ class DiffusionServingModels:
     """
 
     def __init__(self, base_model_paths: list[BaseModelPath]) -> None:
-        self._base_model_paths = base_model_paths
-        self.model_name = base_model_paths[0].name
+        self.base_model_paths = base_model_paths
 
     async def show_available_models(self) -> ModelList:
         return ModelList(
@@ -27,6 +26,9 @@ class DiffusionServingModels:
                     root=base_model.model_path,
                     permission=[ModelPermission()],
                 )
-                for base_model in self._base_model_paths
+                for base_model in self.base_model_paths
             ]
         )
+
+    def model_name(self):
+        return self.base_model_paths[0].name
