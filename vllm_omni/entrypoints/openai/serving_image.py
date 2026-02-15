@@ -60,7 +60,7 @@ class OmniOpenAIServingImage(OpenAIServing):
             log_error_stack=log_error_stack,
         )
         self._engine_client = engine_client
-        self._model_name = models.model_name
+        self._model_name = models.model_name()
         self._stage_configs = stage_configs
 
         self._stage_types: list[str] = []
@@ -218,7 +218,7 @@ class OmniOpenAIServingImage(OpenAIServing):
         """
         buffer = BytesIO()
         save_kwargs = {}
-        if format in {"jpg", "jpeg", "webp"}:
+        if format in ("jpg", "jpeg", "webp"):
             save_kwargs["quality"] = output_compression
         elif format == "png":
             save_kwargs["compress_level"] = max(0, min(9, 9 - output_compression // 11))  # Map 0-100 to 9-0
@@ -281,7 +281,7 @@ class OmniOpenAIServingImage(OpenAIServing):
     def _choose_output_format(output_format: str | None, background: str | None) -> str:
         # Normalize and choose extension
         fmt = (output_format or "").lower()
-        if fmt in {"jpg", "png", "webp", "jpeg"}:
+        if fmt in ("jpg", "png", "webp", "jpeg"):
             return fmt
         # If transparency requested, prefer png
         if (background or "auto").lower() == "transparent":

@@ -144,8 +144,8 @@ class ImageEditResponse(BaseModel):
 
 
 class ImageEditRequest(BaseModel):
-    image: list[UploadFile] = Field(..., description="Image file to edit")
-    url: str | None = Field(default=None, description="URL of the image to edit")
+    image: list[UploadFile] | None = Field(default=None, description="Image file to edit")
+    url: list[str] | None = Field(default=None, description="URL of the image to edit")
     prompt: str = Field(..., description="Text description of the desired image edit")
     model: str | None = Field(
         default=None,
