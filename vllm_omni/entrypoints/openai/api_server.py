@@ -973,7 +973,7 @@ def _parse_form_json(value: str | None) -> Any:
 
 
 async def _run_image_edits(
-    request: Annotated[ImageEditRequest, Form()],
+    request: ImageEditRequest,
     raw_request: Request,
 ) -> ImageEditResponse | ErrorResponse:
     """
