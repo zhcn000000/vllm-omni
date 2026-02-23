@@ -383,13 +383,13 @@ async def omni_init_app_state(
         diffusion_stage_configs = engine_client.stage_configs if hasattr(engine_client, "stage_configs") else None
         state.openai_serving_video = OmniOpenAIServingVideo.for_diffusion(
             diffusion_engine=engine_client,  # type: ignore[arg-type]
-            models=state.openai_serving_models,  # type: ignore[arg-type]
+            model_name=model_name,
             stage_configs=diffusion_stage_configs,
         )
 
         state.openai_serving_image = OmniOpenAIServingImage.for_diffusion(
             diffusion_engine=engine_client,  # type: ignore[arg-type]
-            models=state.openai_serving_models,  # type: ignore[arg-type]
+            model_name=model_name,
             stage_configs=diffusion_stage_configs,
         )
 

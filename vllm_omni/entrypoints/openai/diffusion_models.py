@@ -30,5 +30,7 @@ class DiffusionServingModels:
             ]
         )
 
-    def model_name(self):
+    def model_name(self) -> str:
+        if not self.base_model_paths:
+            raise ValueError("No base models are configured; cannot determine model_name.")
         return self.base_model_paths[0].name

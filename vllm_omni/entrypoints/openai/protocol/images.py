@@ -132,7 +132,7 @@ class ImageGenerationResponse(BaseModel):
 
 class ImageEditResponse(BaseModel):
     """
-    OpenAI DALL-E compatible image generation response.
+    OpenAI DALL-E compatible image edit response.
 
     Returns generated images with metadata.
     """
@@ -199,8 +199,9 @@ class ImageEditRequest(BaseModel):
         ge=0,
         le=100,
         description=(
-            "Output compression level for edited images (0-100). Higher values result in smaller file sizes "
-            "but lower image quality. Defaults to 0 (no compression)."
+            "Output compression/quality level for edited images (0-100). "
+            "Higher values preserve higher quality (typically larger files), lower values apply stronger compression. "
+            "Defaults to 100."
         ),
     )
     lora: dict[str, Any] | None = Field(

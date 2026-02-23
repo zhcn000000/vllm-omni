@@ -12,14 +12,10 @@ from fastapi import HTTPException, Request
 from PIL import Image
 from vllm import SamplingParams
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.engine.serving import OpenAIServing
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.logger import logger
 
 from vllm_omni.entrypoints.async_omni import AsyncOmni
-from vllm_omni.entrypoints.openai.diffusion_models import DiffusionServingModels
 from vllm_omni.entrypoints.openai.image_api_utils import (
     apply_stage_default_sampling_params,
     encode_image_base64,
@@ -32,68 +28,51 @@ from vllm_omni.entrypoints.openai.protocol.images import (
     ImageGenerationRequest,
     ImageGenerationResponse,
 )
+from vllm_omni.entrypoints.openai.vision_utils_mexin import VisionMixin
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniSamplingParams, OmniTextPrompt
-from vllm_omni.lora.request import LoRARequest
-from vllm_omni.lora.utils import stable_lora_int_id
-from vllm_omni.outputs import OmniRequestOutput
 
 if TYPE_CHECKING:
     from vllm_omni.entrypoints.async_omni_diffusion import AsyncOmniDiffusion
 
 
-class OmniOpenAIServingImage(OpenAIServing):
+class OmniOpenAIServingImage(VisionMixin):
     """OpenAI-style image generation handler for omni diffusion models."""
 
     def __init__(
         self,
         engine_client: EngineClient,
-        models: OpenAIServingModels,
+        model_name: str | None = None,
         stage_configs: list[Any] | None = None,
-        *,
-        request_logger: RequestLogger | None = None,
-        return_tokens_as_token_ids: bool = False,
-        log_error_stack: bool = False,
     ) -> None:
-        super().__init__(
-            engine_client,
-            models,
-            request_logger=request_logger,
-            return_tokens_as_token_ids=return_tokens_as_token_ids,
-            log_error_stack=log_error_stack,
-        )
         self._engine_client = engine_client
-        self._model_name = models.model_name()
+        self._model_name = model_name
         self._stage_configs = stage_configs
 
-        self._stage_types: list[str] = []
-        if stage_configs is not None:
-            for stage in stage_configs:
-                # Handle both dict and OmegaConf objects
-                stage_type = None
-                if isinstance(stage, dict):
-                    stage_type = stage.get("stage_type", "llm")
-                elif hasattr(stage, "get"):
-                    stage_type = stage.get("stage_type", "llm")
-                elif hasattr(stage, "stage_type"):
-                    stage_type = stage.stage_type
-                else:
-                    # Fallback: try to access as dict-like
-                    try:
-                        stage_type = stage["stage_type"] if "stage_type" in stage else "llm"
-                    except (TypeError, KeyError):
-                        stage_type = "llm"
-                self._stage_types.append(stage_type)
+        self._stage_types = self._resolve_stage_types(stage_configs)
+
+    def _resolve_stage_types(self, stage_configs: list[Any] | None = None) -> list[str]:
+        resolved_stage_configs = stage_configs
+        if resolved_stage_configs is None:
+            resolved_stage_configs = cast(list[Any] | None, getattr(self._engine_client, "stage_configs", None))
+
+        if not resolved_stage_configs:
+            return []
+
+        stage_types: list[str] = []
+        for stage in resolved_stage_configs:
+            stage_types.append(self._get_stage_type(stage))
+        return stage_types
 
     @classmethod
     def for_diffusion(
         cls,
         diffusion_engine: AsyncOmniDiffusion,
-        models: DiffusionServingModels,
+        model_name: str | None = None,
         stage_configs: list[Any] | None = None,
     ) -> OmniOpenAIServingImage:
         return cls(
             diffusion_engine,  # type: ignore[arg-type]
-            models=models,  # type: ignore[arg-type]
+            model_name=model_name,
             stage_configs=stage_configs,
         )
 
@@ -139,67 +118,18 @@ class OmniOpenAIServingImage(OpenAIServing):
             ):
                 result = output
         else:
-            result = await engine_client.generate(
+            async for output in engine_client.generate(
                 sampling_params_list=[gen_params],
                 **kwargs,
-            )
+            ):
+                result = output
 
         if result is None:
             raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST.value,
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
                 detail="No output generated from multi-stage pipeline.",
             )
         return result
-
-    @staticmethod
-    def _parse_lora_request(lora_body: dict[str, Any] | None) -> tuple[LoRARequest | None, float | None]:
-        if lora_body is not None:
-            if not isinstance(lora_body, dict):
-                raise HTTPException(
-                    status_code=HTTPStatus.BAD_REQUEST.value,
-                    detail="Invalid lora field: expected an object.",
-                )
-            lora_name = lora_body.get("name") or lora_body.get("lora_name") or lora_body.get("adapter")
-            lora_path = (
-                lora_body.get("local_path")
-                or lora_body.get("path")
-                or lora_body.get("lora_path")
-                or lora_body.get("lora_local_path")
-            )
-            lora_scale = lora_body.get("scale")
-            if lora_scale is None:
-                lora_scale = lora_body.get("lora_scale")
-            lora_int_id = lora_body.get("int_id")
-            if lora_int_id is None:
-                lora_int_id = lora_body.get("lora_int_id")
-            if lora_int_id is None and lora_path:
-                lora_int_id = stable_lora_int_id(str(lora_path))
-
-            if not lora_name or not lora_path:
-                raise HTTPException(
-                    status_code=HTTPStatus.BAD_REQUEST.value,
-                    detail="Invalid lora object: both name and path are required.",
-                )
-
-            return LoRARequest(
-                str(lora_name),
-                int(lora_int_id),  # type: ignore[arg-type]
-                str(lora_path),
-            ), lora_scale
-        return None, None
-
-    @staticmethod
-    def _extract_images_from_result(result: OmniRequestOutput) -> list[Any]:
-        images = []
-        if hasattr(result, "images") and result.images:
-            images = result.images
-        elif hasattr(result, "request_output"):
-            request_output = result.request_output
-            if isinstance(request_output, dict) and request_output.get("images"):  # type: ignore[union-attr]
-                images = request_output["images"]  # type: ignore[union-attr]
-            elif hasattr(request_output, "images") and request_output.images:
-                images = request_output.images
-        return images  # type: ignore[union-attr]
 
     @staticmethod
     def _encode_image_base64_with_compression(
@@ -215,19 +145,20 @@ class OmniOpenAIServingImage(OpenAIServing):
             Base64-encoded image as string
         """
         buffer = BytesIO()
+        normalized_format = format.lower()
         save_kwargs = {}
-        if format in ("jpg", "jpeg", "webp"):
+        if normalized_format in ("jpg", "jpeg", "webp"):
             save_kwargs["quality"] = output_compression
-        elif format == "png":
+        elif normalized_format == "png":
             save_kwargs["compress_level"] = max(0, min(9, 9 - output_compression // 11))  # Map 0-100 to 9-0
 
-        image.save(buffer, format=format, **save_kwargs)
+        image.save(buffer, format=normalized_format, **save_kwargs)
         buffer.seek(0)
         return base64.b64encode(buffer.read()).decode("utf-8")
 
     @staticmethod
     async def _load_input_images(
-        inputs: list[str],
+        inputs: list[Any],
     ) -> list[Image.Image]:
         """
         convert to PIL.Image.Image list
@@ -262,7 +193,8 @@ class OmniOpenAIServingImage(OpenAIServing):
             # 3. UploadFile
             elif hasattr(inp, "file"):
                 try:
-                    img_data = await inp.read()
+                    upload_file = cast(Any, inp)
+                    img_data = await upload_file.read()
                     img = Image.open(BytesIO(img_data))
                     images.append(img)
                 except Exception as e:
@@ -295,6 +227,15 @@ class OmniOpenAIServingImage(OpenAIServing):
         """Process image generation request."""
         engine_client = self.engine_client
         engine_client = cast(AsyncOmni, engine_client)
+        model_name = self._resolve_model_name(raw_request)
+
+        if request.model is not None and model_name is not None and request.model != model_name:
+            logger.warning(
+                "Model mismatch: request specifies '%s' but server is running '%s'. Using server model.",
+                request.model,
+                model_name,
+            )
+
         prompt = OmniTextPrompt(
             prompt=request.prompt,
         )
@@ -359,6 +300,15 @@ class OmniOpenAIServingImage(OpenAIServing):
                 status_code=HTTPStatus.BAD_REQUEST.value,
                 detail="Only response_format 'b64_json' is supported now.",
             )
+
+        model_name = self._resolve_model_name(raw_request)
+
+        if request.model is not None and model_name is not None and request.model != model_name:
+            logger.warning(
+                "Model mismatch: request specifies '%s' but server is running '%s'. Using server model.",
+                request.model,
+                model_name,
+            )
         # 2. Build prompt & images params
         prompt = OmniTextPrompt(
             prompt=request.prompt,
@@ -381,10 +331,24 @@ class OmniOpenAIServingImage(OpenAIServing):
         # 3 Build sample params
         gen_params = OmniDiffusionSamplingParams()
         # 3.0 Init with system default values
-        app_state_args = getattr(raw_request.app.state, "args", None)
+        app_state_args = None
+        if raw_request is not None:
+            app_state_args = getattr(raw_request.app.state, "args", None)
         default_sample_param = getattr(app_state_args, "default_sampling_params", None)
         # Currently only have one diffusion stage
-        diffusion_stage_id = [i for i, t in enumerate(self._stage_types) if t == "diffusion"][0]
+        fallback_stage_configs = (
+            cast(list[Any] | None, getattr(raw_request.app.state, "stage_configs", None))
+            if raw_request is not None
+            else None
+        )
+        stage_types = self._stage_types or self._resolve_stage_types(fallback_stage_configs)
+        diffusion_stage_ids = [i for i, t in enumerate(stage_types) if t == "diffusion"]
+        if not diffusion_stage_ids:
+            raise HTTPException(
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                detail="No diffusion stage configured for image generation.",
+            )
+        diffusion_stage_id = diffusion_stage_ids[0]
         apply_stage_default_sampling_params(
             default_sample_param,
             gen_params,

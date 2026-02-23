@@ -5,18 +5,14 @@ from __future__ import annotations
 
 import time
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 from fastapi import HTTPException, Request
 from PIL import Image
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.engine.serving import OpenAIServing
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.logger import init_logger
 
 from vllm_omni.entrypoints.async_omni import AsyncOmni
-from vllm_omni.entrypoints.openai.diffusion_models import DiffusionServingModels
 from vllm_omni.entrypoints.openai.image_api_utils import parse_size
 from vllm_omni.entrypoints.openai.protocol.videos import (
     VideoData,
@@ -24,50 +20,35 @@ from vllm_omni.entrypoints.openai.protocol.videos import (
     VideoGenerationResponse,
 )
 from vllm_omni.entrypoints.openai.video_api_utils import decode_input_reference, encode_video_base64
+from vllm_omni.entrypoints.openai.vision_utils_mexin import VisionMixin
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniSamplingParams, OmniTextPrompt
-from vllm_omni.lora.request import LoRARequest
-from vllm_omni.lora.utils import stable_lora_int_id
-
-if TYPE_CHECKING:
-    from vllm_omni.entrypoints.async_omni_diffusion import AsyncOmniDiffusion
 
 logger = init_logger(__name__)
 
 
-class OmniOpenAIServingVideo(OpenAIServing):
+class OmniOpenAIServingVideo(VisionMixin):
     """OpenAI-style video generation handler for omni diffusion models."""
 
     def __init__(
         self,
         engine_client: EngineClient,
-        models: OpenAIServingModels,
+        model_name: str | None = None,
         stage_configs: list[Any] | None = None,
-        *,
-        request_logger: RequestLogger | None = None,
-        return_tokens_as_token_ids: bool = False,
-        log_error_stack: bool = False,
     ) -> None:
-        super().__init__(
-            engine_client,
-            models,
-            request_logger=request_logger,
-            return_tokens_as_token_ids=return_tokens_as_token_ids,
-            log_error_stack=log_error_stack,
-        )
         self._engine_client = engine_client
-        self._model_name = models.model_name()
+        self._model_name = model_name
         self._stage_configs = stage_configs
 
     @classmethod
     def for_diffusion(
         cls,
-        diffusion_engine: AsyncOmniDiffusion,
-        models: DiffusionServingModels,
+        diffusion_engine: EngineClient,
+        model_name: str,
         stage_configs: list[Any] | None = None,
     ) -> OmniOpenAIServingVideo:
         return cls(
-            diffusion_engine,  # type: ignore[arg-type]
-            models=models,  # type: ignore[arg-type]
+            diffusion_engine,
+            model_name=model_name,
             stage_configs=stage_configs,
         )
 
@@ -141,7 +122,11 @@ class OmniOpenAIServingVideo(OpenAIServing):
         if request.flow_shift is not None:
             gen_params.extra_args["flow_shift"] = request.flow_shift
 
-        self._apply_lora(request.lora, gen_params)
+        lora_request, lora_scale = self._parse_lora_request(request.lora)
+        if lora_request:
+            gen_params.lora_request = lora_request
+        if lora_scale is not None:
+            gen_params.lora_scale = lora_scale
 
         logger.info(
             "Video sampling params: steps=%s guidance=%s guidance_2=%s seed=%s",
@@ -189,41 +174,6 @@ class OmniOpenAIServingVideo(OpenAIServing):
 
         return width, height, num_frames, fps
 
-    @staticmethod
-    def _apply_lora(lora_body: Any, gen_params: OmniDiffusionSamplingParams) -> None:
-        if lora_body is None:
-            return
-        if not isinstance(lora_body, dict):
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST.value,
-                detail="Invalid lora field: expected an object.",
-            )
-        lora_name = lora_body.get("name") or lora_body.get("lora_name") or lora_body.get("adapter")
-        lora_path = (
-            lora_body.get("local_path")
-            or lora_body.get("path")
-            or lora_body.get("lora_path")
-            or lora_body.get("lora_local_path")
-        )
-        lora_scale = lora_body.get("scale")
-        if lora_scale is None:
-            lora_scale = lora_body.get("lora_scale")
-        lora_int_id = lora_body.get("int_id")
-        if lora_int_id is None:
-            lora_int_id = lora_body.get("lora_int_id")
-        if lora_int_id is None and lora_path:
-            lora_int_id = stable_lora_int_id(str(lora_path))
-
-        if not lora_name or not lora_path:
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST.value,
-                detail="Invalid lora object: both name and path are required.",
-            )
-
-        gen_params.lora_request = LoRARequest(str(lora_name), int(lora_int_id), str(lora_path))
-        if lora_scale is not None:
-            gen_params.lora_scale = float(lora_scale)
-
     async def _run_generation(
         self,
         prompt: OmniTextPrompt,
@@ -256,11 +206,7 @@ class OmniOpenAIServingVideo(OpenAIServing):
         # Video generation endpoint only supports diffusion stages.
         if stage_configs:
             for stage in stage_configs:
-                # Extract stage_type: dicts and OmegaConf objects use .get(), others use getattr
-                if hasattr(stage, "get"):
-                    stage_type = stage.get("stage_type", "llm")
-                else:
-                    stage_type = getattr(stage, "stage_type", "llm")
+                stage_type = self._get_stage_type(stage)
 
                 if stage_type != "diffusion":
                     raise HTTPException(
@@ -324,12 +270,16 @@ class OmniOpenAIServingVideo(OpenAIServing):
             videos = result.images
         elif hasattr(result, "request_output"):
             request_output = result.request_output
-            if isinstance(request_output, dict) and request_output.get("images"):
-                videos = request_output["images"]
-            elif hasattr(request_output, "images") and request_output.images:
-                videos = request_output.images
-            elif hasattr(request_output, "multimodal_output") and request_output.multimodal_output:
-                videos = request_output.multimodal_output.get("video")
+            if isinstance(request_output, dict):
+                if request_output.get("images"):
+                    videos = request_output["images"]
+                elif request_output.get("multimodal_output"):
+                    videos = request_output["multimodal_output"].get("video")
+            else:
+                if hasattr(request_output, "images") and request_output.images:
+                    videos = request_output.images
+                elif hasattr(request_output, "multimodal_output") and request_output.multimodal_output:
+                    videos = request_output.multimodal_output.get("video")
         if videos is None and hasattr(result, "multimodal_output") and result.multimodal_output:
             videos = result.multimodal_output.get("video")
 
