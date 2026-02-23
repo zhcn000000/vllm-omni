@@ -673,16 +673,14 @@ async def omni_init_app_state(
 
     state.openai_serving_video = OmniOpenAIServingVideo(
         engine_client,
-        state.openai_serving_models,
+        state.openai_serving_models.model_name,
         state.stage_configs,
-        request_logger=request_logger,
     )
 
     state.openai_serving_image = OmniOpenAIServingImage(
         engine_client,
-        state.openai_serving_models,
+        state.openai_serving_models.model_name,
         state.stage_configs,
-        request_logger=request_logger,
     )
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
