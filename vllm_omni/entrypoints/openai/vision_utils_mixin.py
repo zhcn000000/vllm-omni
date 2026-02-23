@@ -20,7 +20,7 @@ class VisionMixin:
         return getattr(self, "_model_name")
 
     @staticmethod
-    def _base_request_id(raw_request: Request | None, default: str | None = None) -> str | None:
+    def _base_request_id(raw_request: Request | None, default: str | None = None) -> str:
         """Pull the request id from header if provided, otherwise use default/uuid."""
         if raw_request is not None and ((req_id := raw_request.headers.get("X-Request-Id")) is not None):
             return req_id

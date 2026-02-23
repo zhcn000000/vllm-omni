@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Any
 
 from fastapi import UploadFile
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class ResponseFormat(str, Enum):
@@ -128,6 +128,8 @@ class ImageGenerationResponse(BaseModel):
 
     created: int = Field(..., description="Unix timestamp of when the generation completed")
     data: list[ImageData] = Field(..., description="Array of generated images")
+    output_format: str | None = None
+    size: str | None = None
 
 
 class ImageEditResponse(BaseModel):
@@ -213,3 +215,5 @@ class ImageEditRequest(BaseModel):
             "scale|lora_scale, int_id|lora_int_id)."
         ),
     )
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
