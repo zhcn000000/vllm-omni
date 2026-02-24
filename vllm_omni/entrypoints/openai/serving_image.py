@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import random
 import time
 from http import HTTPStatus
@@ -17,7 +18,6 @@ from vllm.logger import logger
 
 from vllm_omni.entrypoints.async_omni import AsyncOmni
 from vllm_omni.entrypoints.openai.image_api_utils import (
-    apply_stage_default_sampling_params,
     encode_image_base64,
     parse_size,
 )
@@ -75,6 +75,28 @@ class OmniOpenAIServingImage(VisionMixin):
             model_name=model_name,
             stage_configs=stage_configs,
         )
+
+    @staticmethod
+    def apply_stage_default_sampling_params(
+        default_params_json: str | None,
+        sampling_params: Any,
+        stage_key: str,
+    ) -> None:
+        """
+        Update a stage's sampling parameters with vLLM-Omni defaults.
+
+        Args:
+            default_params_json: JSON string of stage-keyed default parameters
+            sampling_params: The sampling parameters object to update
+            stage_key: The stage ID/key in the pipeline
+        """
+        if default_params_json is not None:
+            default_params_dict = json.loads(default_params_json)
+            if stage_key in default_params_dict:
+                stage_defaults = default_params_dict[stage_key]
+                for param_name, param_value in stage_defaults.items():
+                    if hasattr(sampling_params, param_name):
+                        setattr(sampling_params, param_name, param_value)
 
     async def _generate_with_async_omni(
         self,
@@ -260,7 +282,7 @@ class OmniOpenAIServingImage(VisionMixin):
                 status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                 detail="No diffusion stage configured for image generation.",
             )
-        apply_stage_default_sampling_params(
+        self.apply_stage_default_sampling_params(
             default_sample_param,
             gen_params,
             str(diffusion_stage_ids[0]),
@@ -371,7 +393,7 @@ class OmniOpenAIServingImage(VisionMixin):
                 detail="No diffusion stage configured for image generation.",
             )
         diffusion_stage_id = diffusion_stage_ids[0]
-        apply_stage_default_sampling_params(
+        self.apply_stage_default_sampling_params(
             default_sample_param,
             gen_params,
             str(diffusion_stage_id),
