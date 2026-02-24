@@ -942,7 +942,7 @@ async def generate_images(
     # Validate model field (warn if mismatch, don't error)
     handler = Omniimage(raw_request)
     if handler is None:
-        base_server = getattr(raw_request.app.state, "openai_serving_tokenization", None)
+        base_server = getattr(raw_request.app.state, "openai_serving_image", None)
         if base_server is None:
             raise HTTPException(
                 status_code=HTTPStatus.NOT_FOUND.value,
