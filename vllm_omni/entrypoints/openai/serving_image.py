@@ -28,7 +28,7 @@ from vllm_omni.entrypoints.openai.protocol.images import (
     ImageGenerationRequest,
     ImageGenerationResponse,
 )
-from vllm_omni.entrypoints.openai.vision_utils_mexin import VisionMixin
+from vllm_omni.entrypoints.openai.vision_utils_mixin import VisionMixin
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniSamplingParams, OmniTextPrompt
 
 if TYPE_CHECKING:
@@ -244,6 +244,28 @@ class OmniOpenAIServingImage(VisionMixin):
 
         gen_params = OmniDiffusionSamplingParams(num_outputs_per_prompt=request.n)
 
+        app_state_args = None
+        if raw_request is not None:
+            app_state_args = getattr(raw_request.app.state, "args", None)
+        default_sample_param = getattr(app_state_args, "default_sampling_params", None)
+        fallback_stage_configs = (
+            cast(list[Any] | None, getattr(raw_request.app.state, "stage_configs", None))
+            if raw_request is not None
+            else None
+        )
+        stage_types = self._stage_types or self._resolve_stage_types(fallback_stage_configs)
+        diffusion_stage_ids = [i for i, t in enumerate(stage_types) if t == "diffusion"]
+        if not diffusion_stage_ids:
+            raise HTTPException(
+                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                detail="No diffusion stage configured for image generation.",
+            )
+        apply_stage_default_sampling_params(
+            default_sample_param,
+            gen_params,
+            str(diffusion_stage_ids[0]),
+        )
+
         lora_request, lora_scale = self._parse_lora_request(request.lora)
         if lora_request:
             gen_params.lora_request = lora_request
@@ -293,7 +315,7 @@ class OmniOpenAIServingImage(VisionMixin):
         raw_request: Request | None = None,
     ) -> ImageEditResponse | ErrorResponse:
         """Process image editing request."""
-        # 2. get output format & compression
+        # 1. Validate output format & compression options
         output_format = self._choose_output_format(request.output_format, request.background)
         if request.response_format != "b64_json":
             raise HTTPException(
@@ -309,7 +331,7 @@ class OmniOpenAIServingImage(VisionMixin):
                 request.model,
                 model_name,
             )
-        # 2. Build prompt & images params
+        # 2. Build prompt & image inputs
         prompt = OmniTextPrompt(
             prompt=request.prompt,
         )
@@ -328,7 +350,7 @@ class OmniOpenAIServingImage(VisionMixin):
         prompt["multi_modal_data"] = {}
         prompt["multi_modal_data"]["image"] = pil_images
 
-        # 3 Build sample params
+        # 3. Build sampling params
         gen_params = OmniDiffusionSamplingParams()
         # 3.0 Init with system default values
         app_state_args = None

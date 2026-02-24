@@ -20,7 +20,7 @@ from vllm_omni.entrypoints.openai.protocol.videos import (
     VideoGenerationResponse,
 )
 from vllm_omni.entrypoints.openai.video_api_utils import decode_input_reference, encode_video_base64
-from vllm_omni.entrypoints.openai.vision_utils_mexin import VisionMixin
+from vllm_omni.entrypoints.openai.vision_utils_mixin import VisionMixin
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams, OmniSamplingParams, OmniTextPrompt
 
 logger = init_logger(__name__)
