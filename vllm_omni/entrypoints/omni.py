@@ -38,7 +38,6 @@ from vllm_omni.entrypoints.omni_stage import OmniStage
 from vllm_omni.entrypoints.stage_utils import SHUTDOWN_TASK, OmniStageTaskType
 from vllm_omni.entrypoints.stage_utils import maybe_load_from_ipc as _load
 from vllm_omni.entrypoints.utils import (
-    build_base_engine_args,
     get_final_stage_id_for_e2e,
     inject_omni_kv_config,
     load_and_resolve_stage_configs,
@@ -255,15 +254,17 @@ class OmniBase:
         # TODO(wuhang):
         # Remove kwargs as parameters in the future.
         # Use dataclass directly for engine args.
-        base_engine_args = build_base_engine_args(kwargs)
 
         stage_configs_path = kwargs.get("stage_configs_path", None)
+
+        # TTS-specific CLI overrides
+        self.tts_max_instructions_length: int | None = kwargs.get("tts_max_instructions_length", None)
 
         # Load stage configurations from YAML
         config_path, stage_configs = load_and_resolve_stage_configs(
             model,
             stage_configs_path,
-            base_engine_args,
+            kwargs,
             default_stage_cfg_factory=lambda: self._create_default_diffusion_stage_cfg(kwargs),
         )
 
@@ -284,6 +285,13 @@ class OmniBase:
                 if lora_scale is not None:
                     if not hasattr(cfg.engine_args, "lora_scale") or cfg.engine_args.lora_scale is None:
                         cfg.engine_args.lora_scale = lora_scale
+                quantization_config = kwargs.get("quantization_config")
+                if quantization_config is not None:
+                    if (
+                        not hasattr(cfg.engine_args, "quantization_config")
+                        or cfg.engine_args.quantization_config is None
+                    ):
+                        cfg.engine_args.quantization_config = quantization_config
             except Exception as e:
                 logger.warning("Failed to inject LoRA config for stage: %s", e)
 
@@ -370,9 +378,13 @@ class OmniBase:
             # Allocate endpoints for each stage
             total_stages = len(self.stage_configs)
             self._handshake_endpoints = {}
+
+            # If --stage-id is not set, use local_only mode
+            local_only = self._single_stage_id is None
+
             for sid in range(total_stages):
-                in_endpoint = get_engine_client_zmq_addr(local_only=False, host=self._zmq_master_address)
-                out_endpoint = get_engine_client_zmq_addr(local_only=False, host=self._zmq_master_address)
+                in_endpoint = get_engine_client_zmq_addr(local_only=local_only, host=self._zmq_master_address)
+                out_endpoint = get_engine_client_zmq_addr(local_only=local_only, host=self._zmq_master_address)
                 self._handshake_endpoints[sid] = (in_endpoint, out_endpoint)
                 logger.debug(
                     f"[{self._name}] Allocated endpoints for stage-{sid}: in={in_endpoint}, out={out_endpoint}"
@@ -484,6 +496,22 @@ class OmniBase:
 
         logger.warning(f"[{self._name}] Stage initialization timeout. Troubleshooting Steps:\n{formatted_suggestions}")
 
+    def _is_profiler_enabled(self, stage_id: int) -> bool:
+        """Check if profiler config is set for a given stage."""
+        stage = self.stage_list[stage_id]
+        # For diffusion stages, profiling is controlled by VLLM_TORCH_PROFILER_DIR env var
+        if stage.stage_type == "diffusion":
+            return True
+        # For LLM stages, check if profiler_config is set in engine_args
+        engine_args = getattr(stage.stage_config, "engine_args", None)
+        if engine_args is None:
+            return False
+        profiler_config = getattr(engine_args, "profiler_config", None)
+        if profiler_config is None:
+            return False
+        profiler = getattr(profiler_config, "profiler", None)
+        return profiler is not None
+
     def start_profile(self, stages: list[int] | None = None) -> None:
         """Start profiling for specified stages.
 
@@ -508,6 +536,13 @@ class OmniBase:
 
         for stage_id in stages:
             if stage_id < len(self.stage_list):
+                if not self._is_profiler_enabled(stage_id):
+                    logger.info(
+                        "[%s] Skipping start_profile for stage-%s: profiler config not set",
+                        self._name,
+                        stage_id,
+                    )
+                    continue
                 try:
                     self.stage_list[stage_id].submit({"type": OmniStageTaskType.PROFILER_START})
                     logger.info("[%s] Sent start_profile to stage-%s", self._name, stage_id)
@@ -531,6 +566,13 @@ class OmniBase:
 
         for stage_id in stages:
             if stage_id < len(self.stage_list):
+                if not self._is_profiler_enabled(stage_id):
+                    logger.info(
+                        "[%s] Skipping stop_profile for stage-%s: profiler config not set",
+                        self._name,
+                        stage_id,
+                    )
+                    continue
                 stage = self.stage_list[stage_id]
 
                 # Check if the stage object has our new bridge method

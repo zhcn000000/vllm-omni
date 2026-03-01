@@ -36,7 +36,7 @@ from vllm_omni.distributed.omni_connectors import build_stage_connectors
 from vllm_omni.distributed.omni_connectors.adapter import try_recv_via_connector
 from vllm_omni.distributed.omni_connectors.connectors.base import OmniConnectorBase
 from vllm_omni.distributed.ray_utils.utils import kill_ray_actor, start_ray_actor
-from vllm_omni.engine.arg_utils import AsyncOmniEngineArgs
+from vllm_omni.engine.arg_utils import AsyncOmniEngineArgs, OmniEngineArgs
 from vllm_omni.entrypoints.async_omni_diffusion import AsyncOmniDiffusion
 from vllm_omni.entrypoints.async_omni_llm import AsyncOmniLLM
 from vllm_omni.entrypoints.omni_diffusion import OmniDiffusion
@@ -44,12 +44,13 @@ from vllm_omni.entrypoints.omni_llm import OmniLLM
 from vllm_omni.entrypoints.stage_utils import (
     SHUTDOWN_TASK,
     OmniStageTaskType,
+    _resolve_model_tokenizer_paths,
     _to_dict,
     is_profiler_task,
     maybe_dump_to_shm,
     set_stage_devices,
 )
-from vllm_omni.entrypoints.utils import detect_pid_host
+from vllm_omni.entrypoints.utils import detect_pid_host, filter_dataclass_kwargs
 from vllm_omni.entrypoints.zmq_utils import (
     ZmqQueue,
     create_zmq_queue,
@@ -212,7 +213,8 @@ def _resolve_worker_cls(engine_args: dict[str, Any]) -> None:
     worker_type = engine_args.get("worker_type", None)
     if not worker_type:
         return
-    if engine_args.get("worker_cls"):
+    worker_cls = engine_args.get("worker_cls")
+    if worker_cls is not None and worker_cls != "auto":
         return
     from vllm_omni.platforms import current_omni_platform
 
@@ -250,7 +252,7 @@ class OmniStage:
     """
 
     def __init__(self, stage_config: Any, stage_init_timeout: int = 300):
-        logger.info(f"[OmniStage] stage_config: {stage_config}")
+        logger.debug(f"[OmniStage] stage_config: {stage_config}")
         self.stage_config = stage_config
         self.engine = None
         self.async_engine = None
@@ -268,6 +270,12 @@ class OmniStage:
         self.is_comprehension = getattr(stage_config, "is_comprehension", False)
         # Support for different stage types: "llm" (default) or "diffusion"
         self.stage_type: Literal["llm", "diffusion"] = getattr(stage_config, "stage_type", "llm")
+        if (
+            "stage_id" in stage_config.engine_args
+            and stage_config.engine_args.stage_id != self.stage_id
+            and self.stage_id is not None
+        ):
+            stage_config.engine_args.stage_id = self.stage_id
         if hasattr(stage_config, "custom_process_input_func"):
             # Import the module specified in the config (already a full module path)
             module_path, func_name = stage_config.custom_process_input_func.rsplit(".", 1)
@@ -278,6 +286,7 @@ class OmniStage:
 
         self.final_output = getattr(stage_config, "final_output", False)
         self.final_output_type = getattr(stage_config, "final_output_type", None)
+        self.tts_args = _to_dict(getattr(stage_config, "tts_args", {}))
         default_sampling_params = getattr(stage_config, "default_sampling_params", {})
         # For LLM stage, this can directly be a SamplingParams-compatible dict;
         # For diffusion stage, this only serves as default values for diffusion kwargs.
@@ -700,6 +709,9 @@ def _stage_worker(
     if stage_type != "diffusion":
         _resolve_worker_cls(engine_args)
 
+    # Handle non-standard model directory structures (e.g., tokenizer in root, model in subdir)
+    model = _resolve_model_tokenizer_paths(model, engine_args)
+
     # Resolve ZMQ queue endpoints if needed
     zmq_ctx = None
     if isinstance(in_q, str) or isinstance(out_q, str):
@@ -746,6 +758,7 @@ def _stage_worker(
             engine_args["stage_connector_spec"] = stage_connector_spec
             engine_args["stage_id"] = stage_id
         if stage_type == "diffusion":
+            engine_args = filter_dataclass_kwargs(OmniDiffusionConfig, engine_args)
             engine_args.pop("model_stage", None)
             engine_args.pop("model", None)
             stage_engine = OmniDiffusion(
@@ -755,6 +768,8 @@ def _stage_worker(
                 **engine_args,
             )
         else:
+            engine_args = filter_dataclass_kwargs(OmniEngineArgs, engine_args)
+            engine_args.pop("model", None)
             # Default to LLM engine
             stage_engine = OmniLLM(model=model, **engine_args)
 
@@ -922,8 +937,9 @@ def _stage_worker(
             _rx_bytes_by_rid[rid] = int(_rx_metrics.get("rx_transfer_bytes", 0))
 
             batch_request_ids.append(rid)
-            if isinstance(ein, (str, dict)):
-                # Types like OmniTextPrompt, TextPrompt are TypedDict, essentially dict and enters this branch
+
+            if isinstance(ein, (dict, str)):
+                # For diffusion stage-0, ein might be a string prompt directly
                 batch_engine_inputs.append(ein)
             elif isinstance(ein, Sequence):
                 batch_engine_inputs.extend(ein)
@@ -1097,6 +1113,9 @@ async def _stage_worker_async(
     final_output = stage_payload.get("final_output", False)
     final_output_type = stage_payload.get("final_output_type", None)
 
+    # Handle non-standard model directory structures (e.g., tokenizer in root, model in subdir)
+    model = _resolve_model_tokenizer_paths(model, engine_args)
+
     if stage_type != "diffusion":
         _resolve_worker_cls(engine_args)
 
@@ -1162,6 +1181,7 @@ async def _stage_worker_async(
             engine_args["stage_id"] = stage_id
         if stage_type == "diffusion":
             # For diffusion, we need to extract diffusion-specific config
+            engine_args = filter_dataclass_kwargs(OmniDiffusionConfig, engine_args)
             od_config = _build_od_config(engine_args, model)
 
             # Inject omni config for worker to access stage info
@@ -1178,6 +1198,8 @@ async def _stage_worker_async(
             )
             vllm_config = None  # Diffusion doesn't use vllm_config
         else:
+            engine_args = filter_dataclass_kwargs(AsyncOmniEngineArgs, engine_args)
+            engine_args.pop("model", None)
             omni_engine_args = AsyncOmniEngineArgs(model=model, **engine_args)
             usage_context = UsageContext.OPENAI_API_SERVER
             vllm_config = omni_engine_args.create_engine_config(usage_context=usage_context)
@@ -1208,16 +1230,15 @@ async def _stage_worker_async(
         await stage_engine.reset_mm_cache()
     logger.debug("[Stage-%s] Engine initialized", stage_id)
 
-    async def handle_profiler_task_async(task_type: OmniStageTaskType) -> None:
+    async def handle_profiler_task_async(task_type: OmniStageTaskType) -> dict:
         """Handle profiler task asynchronously for both LLM and diffusion stages."""
         if task_type == OmniStageTaskType.PROFILER_START:
             if stage_type == "diffusion":
                 try:
-                    # Sync call is safe here — diffusion profiling is lightweight
                     profile_dir = os.environ.get("VLLM_TORCH_PROFILER_DIR", "./profiles")
                     os.makedirs(profile_dir, exist_ok=True)
                     trace_filename = f"stage_{stage_id}_diffusion_{int(time.time())}"
-                    stage_engine.start_profile(trace_filename=trace_filename)
+                    await stage_engine.start_profile(trace_filename=trace_filename)
                     logger.info("[Stage-%s] Diffusion Torch profiler started", stage_id)
                 except Exception as e:
                     logger.warning("[Stage-%s] Failed to start diffusion profiler: %s", stage_id, e)
@@ -1227,14 +1248,17 @@ async def _stage_worker_async(
                     logger.info("[Stage-%s] vLLM profiler started", stage_id)
                 except Exception as e:
                     logger.warning("[Stage-%s] Failed to start vLLM profiler: %s", stage_id, e)
+            return {}
 
         elif task_type == OmniStageTaskType.PROFILER_STOP:
+            result_data: dict = {}
             if stage_type == "diffusion":
                 try:
-                    trace_files = stage_engine.stop_profile()
+                    trace_files = await stage_engine.stop_profile()
                     logger.info("[Stage-%s] Diffusion Torch profiler stopped", stage_id)
                     if trace_files:
                         logger.info("Diffusion trace files: %s", trace_files)
+                        result_data = trace_files
                 except Exception as e:
                     logger.warning("[Stage-%s] Failed to stop diffusion profiler: %s", stage_id, e)
             else:
@@ -1243,6 +1267,8 @@ async def _stage_worker_async(
                     logger.info("[Stage-%s] vLLM profiler stopped", stage_id)
                 except Exception as e:
                     logger.warning("[Stage-%s] Failed to stop vLLM profiler: %s", stage_id, e)
+            return result_data
+        return {}
 
     # Signal readiness to orchestrator and send vllm_config back to main process
     try:
@@ -1344,7 +1370,10 @@ async def _stage_worker_async(
                 rid = task["request_id"]
                 asyncio.create_task(stage_engine.abort(rid))
             elif is_profiler_task(task_type):
-                await handle_profiler_task_async(task_type)
+                profiler_data = await handle_profiler_task_async(task_type)
+                # Send result back to orchestrator for STOP command
+                if task_type == OmniStageTaskType.PROFILER_STOP:
+                    out_q.put({"type": "profiler_result", "data": profiler_data})
             else:
                 asyncio.create_task(generation_single_request(task))
 
