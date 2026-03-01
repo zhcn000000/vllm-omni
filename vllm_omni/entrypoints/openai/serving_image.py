@@ -5,6 +5,7 @@ import json
 import random
 import time
 from http import HTTPStatus
+from inspect import isawaitable
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, cast
 
@@ -140,10 +141,13 @@ class OmniOpenAIServingImage(VisionMixin):
             ):
                 result = output
         else:
-            async for output in engine_client.generate(
+            generator = engine_client.generate(
                 sampling_params_list=[gen_params],
                 **kwargs,
-            ):
+            )
+            if isawaitable(generator):
+                generator = await generator
+            async for output in generator:
                 result = output
 
         if result is None:

@@ -1,7 +1,15 @@
+"""Shared utilities for vision-based serving classes (image and video generation).
+
+Provides common functionality for:
+- Model name resolution
+- Request ID generation
+- Engine and stage configuration access
+"""
+
 from __future__ import annotations
 
 from http import HTTPStatus
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import HTTPException, Request
 from vllm.utils import random_uuid
@@ -9,15 +17,22 @@ from vllm.utils import random_uuid
 from vllm_omni.lora.request import LoRARequest
 from vllm_omni.lora.utils import stable_lora_int_id
 
+if TYPE_CHECKING:
+    from vllm.engine.protocol import EngineClient
+
 
 class VisionMixin:
     @property
-    def engine_client(self) -> Any:
-        return getattr(self, "_engine_client")
+    def engine_client(self) -> EngineClient:
+        if hasattr(self, "_engine_client"):
+            return self._engine_client  # type: ignore[unknown-attribute]
+        raise AttributeError("Engine client not found on this instance.")
 
     @property
-    def model_name(self) -> str | None:
-        return getattr(self, "_model_name")
+    def model_name(self) -> str:
+        if hasattr(self, "_model_name"):
+            return self._model_name  # type: ignore[unknown-attribute]
+        raise AttributeError("Model name not found on this instance.")
 
     @staticmethod
     def _base_request_id(raw_request: Request | None, default: str | None = None) -> str:

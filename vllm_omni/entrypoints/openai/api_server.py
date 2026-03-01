@@ -687,19 +687,19 @@ async def omni_init_app_state(
     state.server_load_metrics = 0
 
 
-def Omnivideo(request: Request) -> OmniOpenAIServingVideo | None:
+def OmniVideo(request: Request) -> OmniOpenAIServingVideo | None:
     return request.app.state.openai_serving_video
 
 
-def Omnichat(request: Request) -> OmniOpenAIServingChat | None:
+def OmniChat(request: Request) -> OmniOpenAIServingChat | None:
     return request.app.state.openai_serving_chat
 
 
-def Omnispeech(request: Request) -> OmniOpenAIServingSpeech | None:
+def OmniSpeech(request: Request) -> OmniOpenAIServingSpeech | None:
     return request.app.state.openai_serving_speech
 
 
-def Omniimage(request: Request) -> OmniOpenAIServingImage | None:
+def OmniImage(request: Request) -> OmniOpenAIServingImage | None:
     return request.app.state.openai_serving_image
 
 
@@ -717,7 +717,7 @@ def Omniimage(request: Request) -> OmniOpenAIServingImage | None:
 @load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
     metrics_header_format = raw_request.headers.get(ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, "")
-    handler = Omnichat(raw_request)
+    handler = OmniChat(raw_request)
     if handler is None:
         base_server = getattr(raw_request.app.state, "openai_serving_tokenization", None)
         if base_server is None:
@@ -792,7 +792,7 @@ _remove_route_from_router(router, "/v1/audio/speech", {"POST"})
 @with_cancellation
 @load_aware_call
 async def create_speech(request: OpenAICreateSpeechRequest, raw_request: Request):
-    handler = Omnispeech(raw_request)
+    handler = OmniSpeech(raw_request)
     if handler is None:
         base_server = getattr(raw_request.app.state, "openai_serving_tokenization", None)
         if base_server is None:
@@ -818,7 +818,7 @@ async def create_speech(request: OpenAICreateSpeechRequest, raw_request: Request
 )
 async def list_voices(raw_request: Request):
     """List available TTS voices/speakers from the loaded model."""
-    handler = Omnispeech(raw_request)
+    handler = OmniSpeech(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(message="The model does not support Speech API")
 
@@ -940,7 +940,7 @@ async def generate_images(
     # Get engine client (AsyncOmni) from app state
 
     # Validate model field (warn if mismatch, don't error)
-    handler = Omniimage(raw_request)
+    handler = OmniImage(raw_request)
     if handler is None:
         base_server = getattr(raw_request.app.state, "openai_serving_image", None)
         if base_server is None:
@@ -984,7 +984,7 @@ async def _run_image_edits(
     OpenAI-compatible image edit endpoint.
     """
     # 1. get engine and model
-    handler = Omniimage(raw_request)
+    handler = OmniImage(raw_request)
     if handler is None:
         base_server = getattr(raw_request.app.state, "openai_serving_image", None)
         if base_server is None:
@@ -1071,7 +1071,7 @@ async def _run_video_generation(
     *,
     input_reference_bytes: bytes | None = None,
 ) -> VideoGenerationResponse:
-    handler = Omnivideo(raw_request)
+    handler = OmniVideo(raw_request)
     if handler is None:
         raise HTTPException(
             status_code=HTTPStatus.SERVICE_UNAVAILABLE.value,
