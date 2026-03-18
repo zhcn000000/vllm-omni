@@ -78,12 +78,6 @@ class OmniOpenAIServingVideo(VisionMixin):
         *,
         reference_image: ReferenceImage | None = None,
     ) -> VideoGenerationResponse:
-        if request.stream:
-            raise HTTPException(
-                status_code=HTTPStatus.BAD_REQUEST.value,
-                detail="Streaming video generation is not supported yet.",
-            )
-
         request_id = f"video_gen_{self._base_request_id(raw_request)}"
         model_name = self._resolve_model_name(raw_request)
 
@@ -177,18 +171,6 @@ class OmniOpenAIServingVideo(VisionMixin):
         _t_encode_ms = (time.perf_counter() - _t_encode_start) * 1000
         logger.info("Video response encoding (MP4+base64): %.2f ms", _t_encode_ms)
         return VideoGenerationResponse(created=int(time.time()), data=video_data)
-
-    def _resolve_model_name(self, raw_request: Request | None) -> str | None:
-        if self._model_name:
-            return self._model_name
-        if raw_request is None:
-            return None
-        serving_models = getattr(raw_request.app.state, "openai_serving_models", None)
-        if serving_models and getattr(serving_models, "base_model_paths", None):
-            base_paths = serving_models.base_model_paths
-            if base_paths:
-                return base_paths[0].name
-        return None
 
     @staticmethod
     def _resolve_video_params(request: VideoGenerationRequest) -> tuple[int | None, int | None, int | None, int | None]:

@@ -85,13 +85,6 @@ class VideoGenerationRequest(BaseModel):
         default=None,
         description="Model to use (optional, uses server's configured model if omitted)",
     )
-    stream: bool = Field(
-        default=False,
-        description=(
-            "(Current not work) Whether to stream back the video data as it's generated. If false, "
-            "the server will buffer the entire video before responding."
-        ),
-    )
     prompt: str = Field(..., description="Text description of the desired video(s)")
     seconds: SecondStr | None = Field(
         default=None,
