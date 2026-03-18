@@ -224,15 +224,14 @@ class OmniOpenAIServingVideo(VisionMixin):
             )
 
         # Video generation endpoint only supports diffusion stages.
-        if stage_configs:
-            for stage in stage_configs:
-                stage_type = self._get_stage_type(stage)
+        for stage in stage_configs:
+            stage_type = self._get_stage_type(stage)
 
-                if stage_type != "diffusion":
-                    raise HTTPException(
-                        status_code=HTTPStatus.SERVICE_UNAVAILABLE.value,
-                        detail=f"Video generation only supports diffusion stages, found '{stage_type}' stage.",
-                    )
+            if stage_type != "diffusion":
+                raise HTTPException(
+                    status_code=HTTPStatus.SERVICE_UNAVAILABLE.value,
+                    detail=f"Video generation only supports diffusion stages, found '{stage_type}' stage.",
+                )
 
         # Common generation logic for both paths
         engine_client = cast(AsyncOmni, self._engine_client)
@@ -286,16 +285,12 @@ class OmniOpenAIServingVideo(VisionMixin):
             videos = result.images
         elif hasattr(result, "request_output"):
             request_output = result.request_output
-            if isinstance(request_output, dict):
-                if request_output.get("images"):
-                    videos = request_output["images"]
-                elif request_output.get("multimodal_output"):
-                    videos = request_output["multimodal_output"].get("video")
-            else:
-                if hasattr(request_output, "images") and request_output.images:
-                    videos = request_output.images
-                elif hasattr(request_output, "multimodal_output") and request_output.multimodal_output:
-                    videos = request_output.multimodal_output.get("video")
+            if isinstance(request_output, dict) and request_output.get("images"):
+                videos = request_output["images"]
+            elif hasattr(request_output, "images") and request_output.images:
+                videos = request_output.images
+            elif hasattr(request_output, "multimodal_output") and request_output.multimodal_output:
+                videos = request_output.multimodal_output.get("video")
         if videos is None and hasattr(result, "multimodal_output") and result.multimodal_output:
             videos = result.multimodal_output.get("video")
 
