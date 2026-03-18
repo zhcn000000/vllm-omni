@@ -1011,7 +1011,7 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             return error_check_ret
         if self.engine_client.errored:
             raise self.engine_client.dead_error
-        request_id = f"speech-{self._base_request_id(raw_request)}"
+        request_id = f"speech_{self._base_request_id(raw_request)}"
         try:
             if request.stream:
                 # Determine response format and media type for streaming
