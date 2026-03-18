@@ -50,10 +50,6 @@ class OmniOpenAIServingVideo(VisionMixin):
         self._model_name = model_name
         self._stage_configs = stage_configs
 
-    @property
-    def stage_configs(self) -> list[Any] | None:
-        return self._stage_configs
-
     def set_stage_configs_if_missing(self, stage_configs: list[Any] | None) -> None:
         if self._stage_configs is None and stage_configs is not None:
             self._stage_configs = stage_configs
