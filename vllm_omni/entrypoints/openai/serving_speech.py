@@ -1032,7 +1032,6 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
                     )
 
                 media_type = "audio/wav" if response_format == "wav" else "audio/pcm"
-                request_id = f"speech-{self._base_request_id(raw_request)}"
                 generator, _ = await self._prepare_speech_generation(request, request_id)
                 return StreamingResponse(
                     self._generate_audio_chunks(generator, request_id, response_format),
