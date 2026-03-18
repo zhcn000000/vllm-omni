@@ -14,7 +14,6 @@ from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 
 from vllm_omni.entrypoints.async_omni import AsyncOmni
-from vllm_omni.entrypoints.openai.image_api_utils import parse_size
 from vllm_omni.entrypoints.openai.protocol.videos import (
     VideoData,
     VideoGenerationRequest,
@@ -167,25 +166,6 @@ class OmniOpenAIServingVideo(VisionMixin):
         _t_encode_ms = (time.perf_counter() - _t_encode_start) * 1000
         logger.info("Video response encoding (MP4+base64): %.2f ms", _t_encode_ms)
         return VideoGenerationResponse(created=int(time.time()), data=video_data)
-
-    @staticmethod
-    def _resolve_video_params(request: VideoGenerationRequest) -> tuple[int | None, int | None, int | None, int | None]:
-        width = request.width or (request.video_params.width if request.video_params else None)
-        height = request.height or (request.video_params.height if request.video_params else None)
-        num_frames = request.num_frames or (request.video_params.num_frames if request.video_params else None)
-        fps = request.fps or (request.video_params.fps if request.video_params else None)
-        seconds = request.seconds
-
-        if request.size:
-            width, height = parse_size(request.size)
-
-        if fps is None:
-            fps = 24  # Default FPS if not specified
-
-        if num_frames is None and seconds is not None:
-            num_frames = int(seconds) * int(fps)
-
-        return width, height, num_frames, fps
 
     async def _run_generation(
         self,
