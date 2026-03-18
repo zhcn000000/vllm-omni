@@ -240,7 +240,7 @@ class OmniStreamingSpeechHandler:
 
         total_bytes = 0
         generation_failed = False
-        request_id = self._speech_service._base_request_id(raw_request) or ""
+        request_id = f"speech-{self._speech_service._base_request_id(raw_request)}"
         try:
             if config.stream_audio:
                 generator, _ = await self._speech_service._prepare_speech_generation(request, request_id)
