@@ -14,7 +14,6 @@ from vllm_omni.entrypoints.openai.protocol.videos import (
     VideoData,
     VideoGenerationRequest,
     VideoGenerationResponse,
-    VideoResponseFormat,
 )
 
 __all__ = [
@@ -27,6 +26,5 @@ __all__ = [
     "VideoData",
     "VideoGenerationRequest",
     "VideoGenerationResponse",
-    "VideoResponseFormat",
     "OmniChatCompletionStreamResponse",
 ]
