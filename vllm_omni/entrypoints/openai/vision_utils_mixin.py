@@ -34,6 +34,12 @@ class VisionMixin:
             return self._model_name  # type: ignore[unknown-attribute]
         raise AttributeError("Model name not found on this instance.")
 
+    @property
+    def stage_configs(self) -> list[Any] | None:
+        if hasattr(self, "_stage_configs"):
+            return self._stage_configs  # type: ignore[unknown-attribute]
+        raise AttributeError("Stage configs not found on this instance.")
+
     @staticmethod
     def _base_request_id(raw_request: Request | None, default: str | None = None) -> str:
         """Pull the request id from header if provided, otherwise use default/uuid."""
