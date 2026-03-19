@@ -1441,7 +1441,7 @@ async def create_video(
     logger.info("Video generation handler: %s", type(handler).__name__)
     try:
         app_model_name, app_stage_configs = _resolve_video_runtime_context(raw_request)
-        effective_model_name = handler.model_name or app_model_name or request.model or "unknown"
+        effective_model_name = request.model or handler.model_name or app_model_name or "unknown"
         if request.model is not None and effective_model_name is not None and request.model != effective_model_name:
             logger.warning(
                 "Model mismatch: request specifies '%s' but server is running '%s'. Using server model.",
