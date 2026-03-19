@@ -33,10 +33,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-
-# yapf conflicts with isort for this block
-# yapf: disable
-# yapf: enable
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
