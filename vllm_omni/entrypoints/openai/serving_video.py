@@ -49,10 +49,6 @@ class OmniOpenAIServingVideo(VisionMixin):
         self._model_name = model_name
         self._stage_configs = stage_configs
 
-    def set_stage_configs_if_missing(self, stage_configs: list[Any] | None) -> None:
-        if self._stage_configs is None and stage_configs is not None:
-            self._stage_configs = stage_configs
-
     @classmethod
     def for_diffusion(
         cls,
@@ -73,8 +69,10 @@ class OmniOpenAIServingVideo(VisionMixin):
         *,
         reference_image: ReferenceImage | None = None,
     ) -> VideoGenerationResponse:
+        model_name, app_stage_configs = self._resolve_runtime_context(raw_request)
+        if self.stage_configs is None:
+            self.set_stage_configs_if_missing(app_stage_configs)
         request_id = f"video_gen_{self._base_request_id(raw_request)}"
-        model_name = self._resolve_model_name(raw_request)
 
         if request.model is not None and model_name is not None and request.model != model_name:
             logger.warning(

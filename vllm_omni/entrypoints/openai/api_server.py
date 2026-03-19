@@ -1213,18 +1213,6 @@ async def edit_images(
     return await _run_image_edits(request, raw_request)
 
 
-def _resolve_video_runtime_context(raw_request: Request) -> tuple[str | None, list[Any] | None]:
-    app_model_name = None
-    serving_models = getattr(raw_request.app.state, "openai_serving_models", None)
-    if serving_models and getattr(serving_models, "base_model_paths", None):
-        base_paths = serving_models.base_model_paths
-        if base_paths:
-            app_model_name = base_paths[0].name
-
-    app_stage_configs = getattr(raw_request.app.state, "stage_configs", None)
-    return app_model_name, app_stage_configs
-
-
 def _parse_form_json(value: str | None) -> Any:
     if value is None or value == "":
         return None
@@ -1239,7 +1227,7 @@ def _parse_form_json(value: str | None) -> Any:
 
 def video_response_from_request(model_name: str, req: VideoGenerationRequest) -> VideoResponse:
     resp = VideoResponse(
-        model=model_name,
+        model=req.model or model_name,
         status=VideoGenerationStatus.QUEUED,
         size=req.size,
         prompt=req.prompt,
@@ -1435,25 +1423,7 @@ async def create_video(
             detail="Video generation handler not initialized.",
         )
     logger.info("Video generation handler: %s", type(handler).__name__)
-    try:
-        app_model_name, app_stage_configs = _resolve_video_runtime_context(raw_request)
-        effective_model_name = request.model or handler.model_name or app_model_name or "unknown"
-        if request.model is not None and effective_model_name is not None and request.model != effective_model_name:
-            logger.warning(
-                "Model mismatch: request specifies '%s' but server is running '%s'. Using server model.",
-                request.model,
-                effective_model_name,
-            )
-        handler.set_stage_configs_if_missing(app_stage_configs)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("Video generation failed: %s", e)
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-            detail=f"Video generation failed: {str(e)}",
-        )
-    ref = video_response_from_request(effective_model_name, request)
+    ref = video_response_from_request(handler.model_name, request)
 
     try:
         image_data = await decode_input_reference(request.image_reference, input_reference_bytes)

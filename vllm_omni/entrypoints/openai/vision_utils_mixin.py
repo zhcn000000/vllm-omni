@@ -37,8 +37,12 @@ class VisionMixin:
     @property
     def stage_configs(self) -> list[Any] | None:
         if hasattr(self, "_stage_configs"):
-            return self._stage_configs  # type: ignore[unknown-attribute]
+            return self._stage_configs
         raise AttributeError("Stage configs not found on this instance.")
+
+    def set_stage_configs_if_missing(self, stage_configs: list[Any] | None) -> None:
+        if self._stage_configs is None and stage_configs is not None:
+            self._stage_configs = stage_configs
 
     @staticmethod
     def _base_request_id(raw_request: Request | None, default: str | None = None) -> str:
@@ -115,14 +119,15 @@ class VisionMixin:
                 images = request_output.images
         return images
 
-    def _resolve_model_name(self, raw_request: Request | None) -> str | None:
-        if self.model_name:
-            return self.model_name
+    def _resolve_runtime_context(self, raw_request: Request | None) -> tuple[str | None, list[Any] | None]:
         if raw_request is None:
-            return None
+            return self.model_name, None
+        app_model_name = None
         serving_models = getattr(raw_request.app.state, "openai_serving_models", None)
         if serving_models and getattr(serving_models, "base_model_paths", None):
             base_paths = serving_models.base_model_paths
             if base_paths:
-                return base_paths[0].name
-        return None
+                app_model_name = base_paths[0].name
+
+        app_stage_configs = getattr(raw_request.app.state, "stage_configs", None)
+        return app_model_name, app_stage_configs

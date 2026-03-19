@@ -253,7 +253,9 @@ class OmniOpenAIServingImage(VisionMixin):
         """Process image generation request."""
         engine_client = self.engine_client
         engine_client = cast(AsyncOmni, engine_client)
-        model_name = self._resolve_model_name(raw_request)
+        model_name, app_state_configs = self._resolve_runtime_context(raw_request)
+        if self.stage_configs is None:
+            self.set_stage_configs_if_missing(app_state_configs)
 
         if request.model is not None and model_name is not None and request.model != model_name:
             logger.warning(
